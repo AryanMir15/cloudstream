@@ -457,11 +457,16 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
         }
 
         if (load) {
-            viewModel.load(
-                this, result.url, result.apiName, false, if (getApiDubstatusSettings()
-                        .contains(DubStatus.Dubbed)
-                ) DubStatus.Dubbed else DubStatus.Subbed, null
-            )
+            // Prevent network fetch for local cache items
+            if (AppConstants.isLocalContent(result.apiName, result.url)) {
+                viewModel.loadSmall(result)
+            } else {
+                viewModel.load(
+                    this, result.url, result.apiName, false, if (getApiDubstatusSettings()
+                            .contains(DubStatus.Dubbed)
+                    ) DubStatus.Dubbed else DubStatus.Subbed, null
+                )
+            }
         } else {
             viewModel.loadSmall(result)
         }
@@ -1187,6 +1192,7 @@ class MainActivity : AppCompatActivity(), ColorPickerDialogListener, BiometricCa
         setNavigationBarColorCompat(R.attr.primaryGrayBackground)
         updateLocale()
         super.onCreate(savedInstanceState)
+        
         try {
             if (isCastApiAvailable()) {
                 CastContext.getSharedInstance(this) { it.run() }

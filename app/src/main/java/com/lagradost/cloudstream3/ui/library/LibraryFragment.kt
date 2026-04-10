@@ -24,6 +24,7 @@ import com.google.android.material.tabs.TabLayout
 import com.google.android.material.tabs.TabLayoutMediator
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.APIHolder.allProviders
+import com.lagradost.cloudstream3.AppConstants
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKey
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.openBrowser
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.setKey
@@ -37,9 +38,9 @@ import com.lagradost.cloudstream3.mvvm.observe
 import com.lagradost.cloudstream3.syncproviders.SyncAPI
 import com.lagradost.cloudstream3.syncproviders.SyncIdName
 import com.lagradost.cloudstream3.ui.AutofitRecyclerView
-import com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment
-import com.lagradost.cloudstream3.utils.txt
 import com.lagradost.cloudstream3.ui.BaseFragment
+import com.lagradost.cloudstream3.ui.library.PageAdapter
+import com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD
 import com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_SHOW_METADATA
 import com.lagradost.cloudstream3.ui.settings.Globals.PHONE
@@ -52,6 +53,7 @@ import com.lagradost.cloudstream3.utils.DataStoreHelper.currentAccount
 import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showBottomDialog
 import com.lagradost.cloudstream3.utils.UIHelper.fixSystemBarsPadding
 import com.lagradost.cloudstream3.utils.UIHelper.getSpanCount
+import com.lagradost.cloudstream3.utils.txt
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.abs
 
@@ -88,7 +90,7 @@ class LibraryFragment : BaseFragment<FragmentLibraryBinding>(
         const val VIEWPAGER_ITEM_KEY = "viewpager_item"
     }
 
-    private val libraryViewModel: LibraryViewModel by activityViewModels()
+    private val libraryViewModel: LibraryViewModelEnhanced by activityViewModels()
 
     private var toggleRandomButton = false
 
@@ -175,6 +177,8 @@ class LibraryFragment : BaseFragment<FragmentLibraryBinding>(
 
         libraryViewModel.reloadPages(false)
 
+        // Initialize library poster size
+        // Note: This will be called from ViewpagerAdapter when the RecyclerView is attached
         binding.listSelector.setOnClickListener {
             val items = libraryViewModel.availableApiNames
             val currentItem = libraryViewModel.currentApiName.value
@@ -311,7 +315,14 @@ class LibraryFragment : BaseFragment<FragmentLibraryBinding>(
                 }
 
                 SEARCH_ACTION_LOAD -> {
-                    loadLibraryItem(syncName, syncId, searchClickCallback.card)
+                    if (AppConstants.isLocalContent(searchClickCallback.card.apiName, searchClickCallback.card.url)) {
+                        (activity as? MainActivity)?.loadPopup(
+                            searchClickCallback.card,
+                            load = true
+                        )
+                    } else {
+                        loadLibraryItem(syncName, syncId, searchClickCallback.card)
+                    }
                 }
             }
         }

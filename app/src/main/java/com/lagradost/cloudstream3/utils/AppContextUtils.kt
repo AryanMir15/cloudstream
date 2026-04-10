@@ -762,23 +762,24 @@ object AppContextUtils {
         card: SearchResponse,
         startAction: Int = 0,
         startValue: Int? = null,
+        metadataSwap: Boolean = false,
     ) {
-        activity?.loadSearchResult(card, startAction, startValue)
+        activity?.loadSearchResult(card, startAction, startValue, metadataSwap)
     }
 
     fun Activity?.loadSearchResult(
         card: SearchResponse,
         startAction: Int = 0,
         startValue: Int? = null,
+        metadataSwap: Boolean = false,
     ) {
         this?.runOnUiThread {
             // viewModelStore.clear()
             this.navigate(
                 getResultsId(),
-                ResultFragment.newInstance(card, startAction, startValue)
+                ResultFragment.newInstance(card, startAction, startValue, metadataSwap)
             )
         }
-        //(this as? AppCompatActivity?)?.loadResult(card.url, card.apiName, startAction, startValue)
     }
 
     fun Activity.requestLocalAudioFocus(focusRequest: AudioFocusRequest?) {

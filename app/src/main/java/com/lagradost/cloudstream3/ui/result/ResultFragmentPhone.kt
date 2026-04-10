@@ -32,6 +32,9 @@ import com.google.android.gms.cast.framework.CastButtonFactory
 import com.google.android.gms.cast.framework.CastContext
 import com.google.android.material.bottomsheet.BottomSheetDialog
 import com.google.android.material.button.MaterialButton
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import com.lagradost.cloudstream3.APIHolder
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import com.lagradost.cloudstream3.DubStatus
@@ -43,6 +46,7 @@ import com.lagradost.cloudstream3.SearchResponse
 import com.lagradost.cloudstream3.base64Encode
 import com.lagradost.cloudstream3.databinding.FragmentResultBinding
 import com.lagradost.cloudstream3.databinding.FragmentResultSwipeBinding
+import com.lagradost.cloudstream3.databinding.MetadataPreviewDialogBinding
 import com.lagradost.cloudstream3.databinding.ResultRecommendationsBinding
 import com.lagradost.cloudstream3.databinding.ResultSyncBinding
 import com.lagradost.cloudstream3.mvvm.Resource
@@ -80,6 +84,7 @@ import com.lagradost.cloudstream3.utils.ImageLoader.loadImage
 import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showBottomDialog
 import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showBottomDialogInstant
 import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showDialog
+import com.lagradost.cloudstream3.utils.SingleSelectionHelper.showMultiDialog
 import com.lagradost.cloudstream3.utils.UIHelper.clipboardHelper
 import com.lagradost.cloudstream3.utils.UIHelper.colorFromAttribute
 import com.lagradost.cloudstream3.utils.UIHelper.dismissSafe
@@ -299,12 +304,365 @@ open class ResultFragmentPhone : FullScreenPlayer() {
             }
         }
 
+        binding?.resultRefreshMetadata?.setOnClickListener {
+            val metaProviders = viewModel.getAvailableMetaProviders()
+            if (metaProviders.isEmpty()) {
+                activity?.let { showToast(it, "No providers available") }
+                return@setOnClickListener
+            }
+            activity?.showBottomDialog(
+                metaProviders,
+                0,
+                "Select metadata source",
+                false,
+                {},
+                { providerIndex ->
+                    val selectedProvider = metaProviders[providerIndex]
+                    openSearchForMetadata(selectedProvider)
+                }
+            )
+        }
+
         resultBinding?.resultReloadConnectionOpenInBrowser?.setOnClickListener {
             view?.context?.openBrowser(url)
         }
 
         resultBinding?.resultMetaSite?.setOnClickListener {
             view?.context?.openBrowser(url)
+        }
+
+        // Observe metadata loading state
+        viewModel.metadataLoading.observe(viewLifecycleOwner) { isLoading ->
+            resultBinding?.resultLoading?.visibility = if (isLoading) android.view.View.VISIBLE else android.view.View.GONE
+        }
+
+        // Show swap metadata FAB when in metadata swap mode
+        android.util.Log.d("MetadataSwap", "resultSwapMetadataFab reference: ${binding?.resultSwapMetadataFab}")
+        binding?.resultSwapMetadataFab?.setOnClickListener {
+            android.util.Log.d("MetadataSwap", "Swap metadata FAB clicked")
+            swapMetadataAndReturn()
+        }
+
+        // Undo metadata swap button
+        binding?.resultUndoMetadataFab?.setOnClickListener {
+            android.util.Log.d("MetadataSwap", "Undo metadata FAB clicked")
+            undoMetadataSwap()
+        }
+
+        // Observe metadata swap mode to show/hide swap metadata FAB
+        viewModel.isMetadataSwapMode.observe(viewLifecycleOwner) { isSwapMode ->
+            android.util.Log.d("MetadataSwap", "isMetadataSwapMode changed: $isSwapMode, button visibility: ${if (isSwapMode) "VISIBLE" else "GONE"}")
+            android.util.Log.d("MetadataSwap", "resultSwapMetadataFab is null: ${binding?.resultSwapMetadataFab == null}")
+            binding?.resultSwapMetadataFab?.visibility = if (isSwapMode) android.view.View.VISIBLE else android.view.View.GONE
+            // Hide bookmark FAB when in metadata swap mode to prevent overlap
+            binding?.resultBookmarkFab?.visibility = if (isSwapMode) android.view.View.GONE else android.view.View.VISIBLE
+        }
+
+        // Check cache for swapped metadata to show/hide undo button
+        viewModel.page.observe(viewLifecycleOwner) { response ->
+            if (response is com.lagradost.cloudstream3.mvvm.Resource.Success) {
+                val url = response.value.url
+                val cachedHeader = com.lagradost.cloudstream3.CloudStreamApp.getKey<com.lagradost.cloudstream3.utils.downloader.DownloadObjects.DownloadHeaderCached>(
+                    com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE,
+                    url
+                )
+                android.util.Log.d("MetadataSwap", "Checking cache for undo button - url: $url, hasSwappedMetadata: ${cachedHeader?.hasSwappedMetadata}")
+                binding?.resultUndoMetadataFab?.visibility = if (cachedHeader?.hasSwappedMetadata == true) android.view.View.VISIBLE else android.view.View.GONE
+            }
+        }
+    }
+
+    private fun swapMetadataAndReturn() {
+        android.util.Log.d("MetadataSwap", "swapMetadataAndReturn called")
+        android.util.Log.d("MetadataSwap", "originalResponse: ${viewModel.originalResponse?.name}")
+        android.util.Log.d("MetadataSwap", "currentResponse: ${viewModel.currentResponse?.name}")
+        val currentResponse = viewModel.currentResponse ?: run {
+            android.util.Log.e("MetadataSwap", "currentResponse is null")
+            return
+        }
+        val originalResponse = viewModel.originalResponse ?: run {
+            android.util.Log.e("MetadataSwap", "originalResponse is null")
+            return
+        }
+
+        android.util.Log.d("MetadataSwap", "Swapping metadata from ${currentResponse.name} to ${originalResponse.name}")
+
+        // Store original metadata before swapping for undo functionality
+        val originalActors = (originalResponse as? com.lagradost.cloudstream3.AnimeLoadResponse)?.actors ?: (originalResponse as? com.lagradost.cloudstream3.TvSeriesLoadResponse)?.actors
+        val originalPlot = (originalResponse as? com.lagradost.cloudstream3.AnimeLoadResponse)?.plot ?: (originalResponse as? com.lagradost.cloudstream3.TvSeriesLoadResponse)?.plot
+        val originalPoster = originalResponse.posterUrl
+        com.lagradost.cloudstream3.CloudStreamApp.setKey(
+            com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE,
+            "${originalResponse.url}_original",
+            com.lagradost.cloudstream3.utils.downloader.DownloadObjects.DownloadHeaderCached(
+                apiName = originalResponse.apiName,
+                url = originalResponse.url,
+                type = originalResponse.type,
+                name = originalResponse.name,
+                poster = originalPoster,
+                plot = originalPlot,
+                score = originalResponse.score?.toInt(),
+                showStatus = if (originalResponse is com.lagradost.cloudstream3.AnimeLoadResponse) originalResponse.showStatus?.name else if (originalResponse is com.lagradost.cloudstream3.TvSeriesLoadResponse) originalResponse.showStatus?.name else null,
+                year = originalResponse.year,
+                episodeCount = if (originalResponse is com.lagradost.cloudstream3.AnimeLoadResponse) originalResponse.episodes.values.flatten().size else if (originalResponse is com.lagradost.cloudstream3.TvSeriesLoadResponse) originalResponse.episodes.size else null,
+                date = null,
+                actors = originalActors?.map { actorData ->
+                    "${actorData.actor.name}|${actorData.actor.image}|${actorData.role?.name}|${actorData.roleString}|${actorData.voiceActor?.name}|${actorData.voiceActor?.image}"
+                },
+                id = originalResponse.getId(),
+                cacheTime = System.currentTimeMillis(),
+                hasCustomPoster = false,
+                hasSwappedMetadata = false
+            )
+        )
+        android.util.Log.d("MetadataSwap", "Stored original metadata for undo: ${originalResponse.url}_original")
+
+        // Show field selection modal dialog
+        val fieldNames = arrayOf("Plot", "Poster", "Actors", "Score", "Status", "Year")
+        val fieldChecked = booleanArrayOf(true, true, true, true, true, true) // All fields selected by default
+
+        val context = activity ?: return
+        val builder = androidx.appcompat.app.AlertDialog.Builder(context)
+        builder.setTitle("Select fields to swap")
+        builder.setMultiChoiceItems(fieldNames, fieldChecked) { _, which, isChecked ->
+            fieldChecked[which] = isChecked
+        }
+        builder.setPositiveButton("Confirm") { _, _ ->
+            // Get selected fields
+            val selectedFields = mutableListOf<String>()
+            fieldNames.forEachIndexed { index, name ->
+                if (fieldChecked[index]) {
+                    selectedFields.add(name)
+                }
+            }
+
+            android.util.Log.d("MetadataSwap", "Selected fields: ${selectedFields.joinToString()}")
+
+            // Convert selected field names to MetadataField enum values
+            val fieldsToSwap = selectedFields.mapNotNull { fieldName ->
+                when (fieldName) {
+                    "Plot" -> MetadataField.PLOT
+                    "Poster" -> MetadataField.POSTER
+                    "Actors" -> MetadataField.ACTORS
+                    "Score" -> MetadataField.SCORE
+                    "Status" -> MetadataField.STATUS
+                    "Year" -> MetadataField.YEAR
+                    else -> null
+                }
+            }.toSet()
+
+            android.util.Log.d("MetadataSwap", "Converted to MetadataField enum: $fieldsToSwap")
+
+            // Swap selected metadata fields - merge currentResponse metadata into originalResponse
+            val swappedResponse = viewModel.swapAllMetadata(originalResponse, currentResponse, fieldsToSwap)
+            android.util.Log.d("MetadataSwap", "Swapped response: ${swappedResponse.name}")
+
+            // Store swapped response in static variable so original fragment can access it
+            com.lagradost.cloudstream3.ui.result.ResultViewModel2.sharedSwappedResponse = swappedResponse
+            android.util.Log.d("MetadataSwap", "Stored swapped response in sharedSwappedResponse")
+
+            // Update the original response with swapped metadata
+            viewModel.currentResponse = swappedResponse
+            viewModel.originalResponse = swappedResponse
+
+            // Reset metadata swap mode and clear static variables
+            viewModel.setMetadataSwapMode(false)
+            viewModel.originalResponse = null
+            com.lagradost.cloudstream3.ui.result.ResultViewModel2.sharedOriginalResponse = null
+            com.lagradost.cloudstream3.ui.result.ResultViewModel2.isMetadataSwapActive = false
+
+            // Return to original entry by going back twice (past QuickSearchFragment)
+            context.onBackPressed()
+            context.onBackPressed()
+        }
+        builder.setNegativeButton("Cancel") { dialog, _ ->
+            dialog.dismiss()
+        }
+        builder.show()
+    }
+
+    private fun undoMetadataSwap() {
+        android.util.Log.d("MetadataSwap", "undoMetadataSwap called")
+        val currentResponse = viewModel.currentResponse ?: run {
+            android.util.Log.e("MetadataSwap", "undoMetadataSwap - currentResponse is null")
+            return
+        }
+
+        // Check if original metadata exists in cache
+        val originalCacheKey = "${currentResponse.url}_original"
+        val originalCache = com.lagradost.cloudstream3.CloudStreamApp.getKey<com.lagradost.cloudstream3.utils.downloader.DownloadObjects.DownloadHeaderCached>(
+            com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE,
+            originalCacheKey
+        )
+
+        if (originalCache == null) {
+            android.util.Log.e("MetadataSwap", "undoMetadataSwap - original cache not found for key: $originalCacheKey")
+            activity?.let { androidx.appcompat.app.AlertDialog.Builder(it)
+                .setTitle("Undo Failed")
+                .setMessage("Original metadata not found. Cannot undo.")
+                .setPositiveButton("OK", null)
+                .show() }
+            return
+        }
+
+        android.util.Log.d("MetadataSwap", "undoMetadataSwap - Found original metadata: ${originalCache.name}")
+
+        // Restore original metadata to cache directly from cached data
+        val cacheKey = currentResponse.url
+        com.lagradost.cloudstream3.CloudStreamApp.setKey(
+            com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE,
+            cacheKey,
+            com.lagradost.cloudstream3.utils.downloader.DownloadObjects.DownloadHeaderCached(
+                apiName = originalCache.apiName,
+                url = originalCache.url,
+                type = originalCache.type,
+                name = originalCache.name,
+                poster = originalCache.poster,
+                plot = originalCache.plot,
+                score = originalCache.score,
+                showStatus = originalCache.showStatus,
+                year = originalCache.year,
+                episodeCount = originalCache.episodeCount,
+                date = originalCache.date,
+                actors = originalCache.actors,
+                id = originalCache.id,
+                cacheTime = System.currentTimeMillis(),
+                hasCustomPoster = false,
+                hasSwappedMetadata = false
+            )
+        )
+        android.util.Log.d("MetadataSwap", "undoMetadataSwap - Restored original metadata to cache for url: $cacheKey")
+
+        // Delete the original backup cache
+        com.lagradost.cloudstream3.CloudStreamApp.removeKey(
+            com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE,
+            originalCacheKey
+        )
+        android.util.Log.d("MetadataSwap", "undoMetadataSwap - Deleted original backup cache: $originalCacheKey")
+
+        // Reload the entry to show the restored metadata
+        activity?.let { context ->
+            context.onBackPressedDispatcher?.onBackPressed()
+        }
+        android.util.Log.d("MetadataSwap", "undoMetadataSwap - Reloading entry to show restored metadata")
+
+        activity?.let { androidx.appcompat.app.AlertDialog.Builder(it)
+            .setTitle("Undo Successful")
+            .setMessage("Metadata has been restored to original values. Reloading entry...")
+            .setPositiveButton("OK", null)
+            .show() }
+    }
+
+    private fun openSearchForMetadata(providerName: String) {
+        android.util.Log.d("MetadataSwap", "openSearchForMetadata called with provider: $providerName")
+        val currentResponse = viewModel.currentResponse ?: run {
+            android.util.Log.e("MetadataSwap", "openSearchForMetadata - currentResponse is null")
+            return
+        }
+        val currentName = currentResponse.name
+        android.util.Log.d("MetadataSwap", "openSearchForMetadata - currentResponse: $currentName, provider: $providerName")
+
+        android.util.Log.d("MetadataSwap", "openSearchForMetadata called - storing original response: ${currentResponse.name}")
+
+        // Store original response in static variable BEFORE opening QuickSearchFragment
+        viewModel.originalResponse = currentResponse
+        com.lagradost.cloudstream3.ui.result.ResultViewModel2.sharedOriginalResponse = currentResponse
+        android.util.Log.d("MetadataSwap", "openSearchForMetadata - stored originalResponse in viewModel.originalResponse and sharedOriginalResponse")
+
+        // Set static flag to indicate metadata swap is active
+        com.lagradost.cloudstream3.ui.result.ResultViewModel2.isMetadataSwapActive = true
+        android.util.Log.d("MetadataSwap", "Set isMetadataSwapActive = true, sharedOriginalResponse = ${com.lagradost.cloudstream3.ui.result.ResultViewModel2.sharedOriginalResponse?.name}")
+
+        // Open QuickSearchFragment with provider pre-selected and title pre-filled
+        com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment.pushSearch(
+            activity,
+            autoSearch = currentName,
+            providers = arrayOf(providerName)
+        )
+
+        // Set up callback to handle search result selection
+        com.lagradost.cloudstream3.ui.quicksearch.QuickSearchFragment.clickCallback = { callback ->
+            android.util.Log.d("MetadataSwap", "QuickSearchFragment callback received - action: ${callback.action}")
+            if (callback.action == com.lagradost.cloudstream3.ui.search.SEARCH_ACTION_LOAD) {
+                // Open entry with metadata swap flag
+                openEntryForMetadataSwap(callback.card, providerName)
+            }
+        }
+    }
+
+    private fun openEntryForMetadataSwap(
+        searchResult: com.lagradost.cloudstream3.SearchResponse,
+        providerName: String
+    ) {
+        android.util.Log.d("MetadataSwap", "openEntryForMetadataSwap called - searchResult: ${searchResult.name}, provider: $providerName")
+        android.util.Log.d("MetadataSwap", "openEntryForMetadataSwap - viewModel.currentResponse: ${viewModel.currentResponse?.name}")
+        // Store original response in static variable for swapping back
+        viewModel.originalResponse = viewModel.currentResponse
+        com.lagradost.cloudstream3.ui.result.ResultViewModel2.sharedOriginalResponse = viewModel.currentResponse
+        android.util.Log.d("MetadataSwap", "openEntryForMetadataSwap - stored viewModel.currentResponse in viewModel.originalResponse and sharedOriginalResponse")
+
+        // Open the entry with metadata swap flag
+        android.util.Log.d("MetadataSwap", "openEntryForMetadataSwap - calling loadSearchResult with metadataSwap=true")
+        com.lagradost.cloudstream3.utils.AppContextUtils.loadSearchResult(searchResult, metadataSwap = true)
+    }
+
+    private fun showMetadataPreview(providerName: String, metadata: LoadResponse) {
+        val binding = com.lagradost.cloudstream3.databinding.MetadataPreviewDialogBinding.inflate(
+            LayoutInflater.from(activity)
+        )
+
+        val dialog = BottomSheetDialog(activity ?: return, R.style.AlertDialogCustom)
+        dialog.setContentView(binding.root)
+        dialog.show()
+
+        // Populate poster card
+        binding.posterCard.imageView.loadImage(metadata.posterUrl)
+        binding.posterCard.imageText.text = metadata.name
+
+        // Show rating if available
+        binding.posterCard.textRating.text = metadata.score?.toString() ?: ""
+        binding.posterCard.textRating.visibility = if (metadata.score != null) android.view.View.VISIBLE else android.view.View.GONE
+
+        // Hide other elements not needed for preview
+        binding.posterCard.watchProgressContainer.visibility = android.view.View.GONE
+        binding.posterCard.textQuality.visibility = android.view.View.GONE
+        binding.posterCard.textIsDub.visibility = android.view.View.GONE
+        binding.posterCard.textIsSub.visibility = android.view.View.GONE
+        binding.posterCard.textFlag.visibility = android.view.View.GONE
+        binding.posterCard.episodeText.visibility = android.view.View.GONE
+
+        // Click on card to load entry page
+        binding.posterCard.root.setOnClickListener {
+            dialog.dismiss()
+            // Load the entry from the provider and show the normal page
+            val url = metadata.url
+            if (url != null) {
+                val storedData = getStoredData()
+                viewModel.load(
+                    activity,
+                    url,
+                    storedData?.apiName ?: "",
+                    storedData?.showFillers ?: false,
+                    storedData?.dubStatus ?: DubStatus.Dubbed,
+                    storedData?.start
+                )
+            }
+        }
+
+        // Button handlers
+        binding.closeBtt.setOnClickListener {
+            dialog.dismiss()
+        }
+
+        binding.swapBtt.setOnClickListener {
+            dialog.dismiss()
+            // Swap all metadata fields
+            viewModel.refreshMetadata(providerName, setOf())
+        }
+
+        binding.editSearchBtt.setOnClickListener {
+            dialog.dismiss()
+            openSearchForMetadata(providerName)
         }
     }
 
@@ -352,11 +710,82 @@ open class ResultFragmentPhone : FullScreenPlayer() {
         // ===== setup =====
         fixSystemBarsPadding(view)
         val storedData = getStoredData() ?: return
+
+        // Check if this is a metadata swap navigation (from bundle or static flag)
+        val isMetadataSwapFromBundle = arguments?.getBoolean(com.lagradost.cloudstream3.ui.result.ResultFragment.METADATA_SWAP_BUNDLE) ?: false
+        val isMetadataSwapFromStatic = com.lagradost.cloudstream3.ui.result.ResultViewModel2.isMetadataSwapActive
+        val isMetadataSwap = isMetadataSwapFromBundle || isMetadataSwapFromStatic
+        android.util.Log.d("MetadataSwap", "onViewCreated - isMetadataSwap from bundle: $isMetadataSwapFromBundle, from static: $isMetadataSwapFromStatic")
+        android.util.Log.d("MetadataSwap", "onViewCreated - sharedOriginalResponse: ${com.lagradost.cloudstream3.ui.result.ResultViewModel2.sharedOriginalResponse?.name}")
+        android.util.Log.d("MetadataSwap", "onViewCreated - sharedSwappedResponse: ${com.lagradost.cloudstream3.ui.result.ResultViewModel2.sharedSwappedResponse?.name}")
+        if (isMetadataSwap) {
+            viewModel.setMetadataSwapMode(true)
+            viewModel.originalResponse = com.lagradost.cloudstream3.ui.result.ResultViewModel2.sharedOriginalResponse
+            android.util.Log.d("MetadataSwap", "onViewCreated - Set isMetadataSwapMode to true, originalResponse: ${viewModel.originalResponse?.name}")
+            // Don't clear isMetadataSwapActive here - it should persist while navigating between search results
+        }
+
+        // Check if there's a swapped response available (from metadata swap completion)
+        val swappedResponse = com.lagradost.cloudstream3.ui.result.ResultViewModel2.sharedSwappedResponse
+        android.util.Log.d("MetadataSwap", "onViewCreated - sharedSwappedResponse: ${swappedResponse?.name}")
+        var skipNormalLoad = false
+        if (swappedResponse != null) {
+            android.util.Log.d("MetadataSwap", "onViewCreated - Found swapped response: ${swappedResponse.name}, updating page and cache")
+            android.util.Log.d("MetadataSwap", "onViewCreated - swappedResponse actors: ${(swappedResponse as? com.lagradost.cloudstream3.AnimeLoadResponse)?.actors?.size ?: (swappedResponse as? com.lagradost.cloudstream3.TvSeriesLoadResponse)?.actors?.size}")
+            android.util.Log.d("MetadataSwap", "onViewCreated - swappedResponse plot: ${(swappedResponse as? com.lagradost.cloudstream3.AnimeLoadResponse)?.plot?.take(30) ?: (swappedResponse as? com.lagradost.cloudstream3.TvSeriesLoadResponse)?.plot?.take(30)}")
+            // Clear the swapped response after using it
+            com.lagradost.cloudstream3.ui.result.ResultViewModel2.sharedSwappedResponse = null
+            android.util.Log.d("MetadataSwap", "onViewCreated - Cleared sharedSwappedResponse")
+            // Set the swapped response as the current response
+            viewModel.currentResponse = swappedResponse
+            android.util.Log.d("MetadataSwap", "onViewCreated - Set viewModel.currentResponse to swappedResponse")
+            // Get the API for the swapped response and wrap it in APIRepository
+            val api = com.lagradost.cloudstream3.APIHolder.getApiFromNameNull(swappedResponse.apiName)
+            if (api != null) {
+                val apiRepository = com.lagradost.cloudstream3.ui.APIRepository(api)
+                // Post the swapped response to update the UI
+                viewModel.postPage(swappedResponse, apiRepository)
+                // Update cache with swapped metadata so it persists across fragment recreations
+                val id = swappedResponse.getId()
+                val cacheKey = swappedResponse.url  // Use URL as cache key for consistency between entry view and library view
+                val swappedActors = (swappedResponse as? com.lagradost.cloudstream3.AnimeLoadResponse)?.actors ?: (swappedResponse as? com.lagradost.cloudstream3.TvSeriesLoadResponse)?.actors
+                val swappedPlot = (swappedResponse as? com.lagradost.cloudstream3.AnimeLoadResponse)?.plot ?: (swappedResponse as? com.lagradost.cloudstream3.TvSeriesLoadResponse)?.plot
+                val swappedPoster = swappedResponse.posterUrl
+                com.lagradost.cloudstream3.CloudStreamApp.setKey(
+                    com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE,
+                    cacheKey,
+                    com.lagradost.cloudstream3.utils.downloader.DownloadObjects.DownloadHeaderCached(
+                        apiName = swappedResponse.apiName,
+                        url = swappedResponse.url,
+                        type = swappedResponse.type,
+                        name = swappedResponse.name,
+                        poster = swappedPoster,
+                        plot = swappedPlot,
+                        score = swappedResponse.score?.toInt(),
+                        showStatus = if (swappedResponse is com.lagradost.cloudstream3.AnimeLoadResponse) swappedResponse.showStatus?.name else if (swappedResponse is com.lagradost.cloudstream3.TvSeriesLoadResponse) swappedResponse.showStatus?.name else null,
+                        year = swappedResponse.year,
+                        episodeCount = if (swappedResponse is com.lagradost.cloudstream3.AnimeLoadResponse) swappedResponse.episodes.values.flatten().size else if (swappedResponse is com.lagradost.cloudstream3.TvSeriesLoadResponse) swappedResponse.episodes.size else null,
+                        date = null,
+                        actors = swappedActors?.map { actorData ->
+                            "${actorData.actor.name}|${actorData.actor.image}|${actorData.role?.name}|${actorData.roleString}|${actorData.voiceActor?.name}|${actorData.voiceActor?.image}"
+                        },
+                        id = id,
+                        cacheTime = System.currentTimeMillis(),
+                        hasCustomPoster = true,
+                        hasSwappedMetadata = true
+                    )
+                )
+                android.util.Log.d("MetadataSwap", "onViewCreated - Updated cache with swapped metadata for url: $cacheKey, hasCustomPoster: true")
+                // Skip the normal load since we've already loaded the swapped response
+                skipNormalLoad = true
+            }
+        }
         activity?.window?.decorView?.clearFocus()
         activity?.loadCache()
         context?.updateHasTrailers()
         hideKeyboard()
-        if (storedData.restart || !viewModel.hasLoaded())
+        android.util.Log.d("MetadataSwap", "load check - restart: ${storedData.restart}, hasLoaded: ${viewModel.hasLoaded()}, skipNormalLoad: $skipNormalLoad, willLoad: ${(storedData.restart || !viewModel.hasLoaded()) && !skipNormalLoad}")
+        if ((storedData.restart || !viewModel.hasLoaded()) && !skipNormalLoad)
             viewModel.load(
                 activity,
                 storedData.url,
@@ -365,8 +794,6 @@ open class ResultFragmentPhone : FullScreenPlayer() {
                 storedData.dubStatus,
                 storedData.start
             )
-
-        setUrl(storedData.url)
         syncModel.addFromUrl(storedData.url)
         val api = APIHolder.getApiFromNameNull(storedData.apiName)
 
@@ -654,11 +1081,7 @@ open class ResultFragmentPhone : FullScreenPlayer() {
                     resultResumeProgressHolder.isVisible = false
                     if (!resume.isMovie) {
                         resultNextSeriesButton.isVisible = true
-                        resultNextSeriesButton.text = context?.getNameFull(
-                            resume.result.name,
-                            resume.result.episode,
-                            resume.result.season
-                        )
+                        resultNextSeriesButton.text = context?.getString(R.string.action_continue)
                     }
                     resultResumeSeriesProgress.isVisible = false
                     resultResumeSeriesTitle.isVisible = false
@@ -817,6 +1240,7 @@ open class ResultFragmentPhone : FullScreenPlayer() {
                             parentId = ep.id,
                             score = ep.score,
                             description = ep.description,
+                            date = ep.airDate,
                             cacheTime = System.currentTimeMillis(),
                         ),
                         null
@@ -847,7 +1271,12 @@ open class ResultFragmentPhone : FullScreenPlayer() {
         }
 
         observe(viewModel.page) { data ->
-            if (data == null) return@observe
+            android.util.Log.d("MetadataSwap", "Observer triggered with data: ${data?.javaClass?.simpleName}")
+            if (data == null) {
+                android.util.Log.d("MetadataSwap", "Observer received null, returning early")
+                return@observe
+            }
+            android.util.Log.d("MetadataSwap", "Observer received data: ${(data as? Resource.Success)?.value?.titleText}")
             resultBinding?.apply {
                 PanelsChildGestureRegionObserver.Provider.get().apply {
                     register(resultCastItems)

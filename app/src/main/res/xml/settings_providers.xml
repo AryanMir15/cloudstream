@@ -22,6 +22,13 @@
         android:title="@string/enable_nsfw_on_providers"
         app:defaultValue="false" />
 
+    <SwitchPreference
+        android:icon="@drawable/ic_baseline_autorenew_24"
+        android:key="@string/auto_metadata_fetch_key"
+        android:summary="@string/auto_metadata_fetch_summary"
+        android:title="@string/auto_metadata_fetch"
+        app:defaultValue="true" />
+
     <Preference
         android:icon="@drawable/baseline_network_ping_24"
         android:key="@string/test_providers_key"

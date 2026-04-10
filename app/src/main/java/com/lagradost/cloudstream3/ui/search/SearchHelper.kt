@@ -40,6 +40,7 @@ object SearchHelper {
                                         parentId = card.parentId ?: return,
                                         score = null,
                                         description = null,
+                                        date = null,
                                         cacheTime = System.currentTimeMillis(),
                                     )
                                 )

@@ -192,7 +192,23 @@
             app:exitAnim="@anim/go_left"
             app:popEnterAnim="@anim/go_right"
             app:popExitAnim="@anim/go_left" />
+        <action
+            android:id="@+id/action_navigation_settings_general_to_cacheManagementFragment"
+            app:destination="@id/cacheManagementFragment"
+            app:enterAnim="@anim/enter_anim"
+            app:exitAnim="@anim/exit_anim"
+            app:popEnterAnim="@anim/enter_anim"
+            app:popExitAnim="@anim/exit_anim" />
     </fragment>
+
+    <fragment
+        android:id="@+id/cacheManagementFragment"
+        android:name="com.lagradost.cloudstream3.ui.settings.CacheManagementFragment"
+        android:label="Cache Management"
+        app:enterAnim="@anim/enter_anim"
+        app:exitAnim="@anim/exit_anim"
+        app:popEnterAnim="@anim/enter_anim"
+        app:popExitAnim="@anim/exit_anim" />
 
     <fragment
         android:id="@+id/navigation_settings_extensions"

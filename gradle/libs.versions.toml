@@ -3,6 +3,7 @@
 [versions]
 activityKtx = "1.12.4"
 androidGradlePlugin = "8.13.2"
+androidx-room = "2.6.1"
 appcompat = "1.7.1"
 biometric = "1.4.0-alpha05"
 buildkonfigGradlePlugin = "0.17.1"
@@ -55,6 +56,9 @@ targetSdk = "36"
 
 [libraries]
 activity-ktx = { module = "androidx.activity:activity-ktx", version.ref = "activityKtx" }
+androidx-room-compiler = { module = "androidx.room:room-compiler", version.ref = "androidx-room" }
+androidx-room-ktx = { module = "androidx.room:room-ktx", version.ref = "androidx-room" }
+androidx-room-runtime = { module = "androidx.room:room-runtime", version.ref = "androidx-room" }
 appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
 biometric = { module = "androidx.biometric:biometric", version.ref = "biometric" }
 coil = { module = "io.coil-kt.coil3:coil", version.ref = "coil" }

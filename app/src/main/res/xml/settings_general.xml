@@ -20,6 +20,11 @@
     <PreferenceCategory android:title="@string/title_downloads">
 
         <Preference
+            android:icon="@drawable/ic_baseline_delete_outline_24"
+            android:key="cache_management_key"
+            android:title="Cache Management" />
+
+        <Preference
             android:icon="@drawable/netflix_download"
             android:key="@string/download_path_key"
             android:title="@string/download_path_pref" />

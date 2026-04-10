@@ -68,6 +68,7 @@ object DownloadObjects {
         @JsonProperty("parentId") val parentId: Int,
         @JsonProperty("score") var score: Score? = null,
         @JsonProperty("description") val description: String?,
+        @JsonProperty("date") val date: Long?,
         @JsonProperty("cacheTime") val cacheTime: Long,
         override val id: Int,
     ) : DownloadCached(id) {
@@ -93,7 +94,16 @@ object DownloadObjects {
         @JsonProperty("type") val type: TvType,
         @JsonProperty("name") val name: String,
         @JsonProperty("poster") val poster: String?,
+        @JsonProperty("plot") val plot: String?,
+        @JsonProperty("score") val score: Int?,
+        @JsonProperty("showStatus") val showStatus: String?,
+        @JsonProperty("year") val year: Int?,
+        @JsonProperty("episodeCount") val episodeCount: Int?,
+        @JsonProperty("date") val date: String?,
+        @JsonProperty("actors") val actors: List<String>?,
         @JsonProperty("cacheTime") val cacheTime: Long,
+        @JsonProperty("hasCustomPoster") val hasCustomPoster: Boolean = false,
+        @JsonProperty("hasSwappedMetadata") val hasSwappedMetadata: Boolean = false,
         override val id: Int,
     ) : DownloadCached(id)
 

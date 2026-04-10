@@ -1881,6 +1881,13 @@ object VideoDownloadManager {
                         type = downloadItem.resultType,
                         name = downloadItem.resultName,
                         poster = downloadItem.resultPoster,
+                        plot = null,
+                        score = null,
+                        showStatus = null,
+                        year = null,
+                        episodeCount = null,
+                        date = null,
+                        actors = null,
                         id = downloadItem.resultId,
                         cacheTime = System.currentTimeMillis(),
                     )
@@ -1900,6 +1907,7 @@ object VideoDownloadManager {
                         parentId = downloadItem.resultId,
                         score = downloadItem.episode.score,
                         description = downloadItem.episode.description,
+                        date = null,
                         cacheTime = System.currentTimeMillis(),
                     )
                 )

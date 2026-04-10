@@ -142,9 +142,10 @@ object ResultFragment {
     private const val START_ACTION_BUNDLE = "startAction"
     private const val START_VALUE_BUNDLE = "startValue"
     private const val RESTART_BUNDLE = "restart"
+    const val METADATA_SWAP_BUNDLE = "metadataSwap"
 
     fun newInstance(
-        card: SearchResponse, startAction: Int = 0, startValue: Int? = null
+        card: SearchResponse, startAction: Int = 0, startValue: Int? = null, metadataSwap: Boolean = false
     ): Bundle {
         return Bundle().apply {
             putString(URL_BUNDLE, card.url)
@@ -162,6 +163,7 @@ object ResultFragment {
 
 
             putBoolean(RESTART_BUNDLE, true)
+            putBoolean(METADATA_SWAP_BUNDLE, metadataSwap)
         }
     }
 
@@ -170,7 +172,8 @@ object ResultFragment {
         apiName: String,
         name: String,
         startAction: Int = 0,
-        startValue: Int = 0
+        startValue: Int = 0,
+        metadataSwap: Boolean = false
     ): Bundle {
         return Bundle().apply {
             putString(URL_BUNDLE, url)
@@ -179,6 +182,7 @@ object ResultFragment {
             putInt(START_ACTION_BUNDLE, startAction)
             putInt(START_VALUE_BUNDLE, startValue)
             putBoolean(RESTART_BUNDLE, true)
+            putBoolean(METADATA_SWAP_BUNDLE, metadataSwap)
         }
     }
 

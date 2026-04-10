@@ -137,8 +137,23 @@
                     android:tooltipText="@string/result_open_in_browser"
                     android:background="?android:attr/selectableItemBackgroundBorderless"
                     android:src="@drawable/ic_baseline_public_24"
+                    android:layout_gravity="end|center_vertical" />
+
+            <ImageView
+                    android:nextFocusUp="@id/result_back"
+                    android:nextFocusDown="@id/result_description"
+                    android:nextFocusLeft="@id/result_open_in_browser"
+                    android:nextFocusRight="@id/result_search"
+
+                    android:id="@+id/result_refresh_metadata"
+                    android:layout_width="25dp"
+                    android:layout_height="25dp"
+                    android:layout_margin="5dp"
+                    android:elevation="10dp"
+                    android:tooltipText="@string/refresh_metadata_summary"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_baseline_autorenew_24"
                     android:layout_gravity="end|center_vertical"
-                    android:contentDescription="@string/result_open_in_browser"
                     app:tint="?attr/textColor" />
 
             <ImageView
@@ -240,6 +255,24 @@
                     tools:visibility="visible"
                     android:id="@+id/result_bookmark_fab"
                     app:icon="@drawable/ic_baseline_bookmark_24"
+                    style="@style/ExtendedFloatingActionButton"
+                    tools:ignore="ContentDescription" />
+
+            <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+                    android:visibility="gone"
+                    tools:visibility="visible"
+                    android:id="@+id/result_swap_metadata_fab"
+                    android:text="Swap Metadata"
+                    app:icon="@drawable/ic_baseline_autorenew_24"
+                    style="@style/ExtendedFloatingActionButton"
+                    tools:ignore="ContentDescription" />
+
+            <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+                    android:visibility="gone"
+                    tools:visibility="visible"
+                    android:id="@+id/result_undo_metadata_fab"
+                    android:text="Undo Swap"
+                    app:icon="@drawable/ic_baseline_arrow_back_24"
                     style="@style/ExtendedFloatingActionButton"
                     tools:ignore="ContentDescription" />
 

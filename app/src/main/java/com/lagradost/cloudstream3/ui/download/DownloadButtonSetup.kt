@@ -6,6 +6,7 @@ import androidx.appcompat.app.AlertDialog
 import com.google.android.material.snackbar.Snackbar
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKey
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKeys
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.setKey
 import com.lagradost.cloudstream3.CommonActivity.activity
 import com.lagradost.cloudstream3.R
 import com.lagradost.cloudstream3.mvvm.logError
@@ -122,6 +123,23 @@ object DownloadButtonSetup {
                         click.data.parentId.toString()
                     ) ?: return
 
+                    // Update the clicked episode cache with proper name from API if available
+                    // This ensures the episode title is preserved for the player sidebar
+                    if (click.data.name != null) {
+                        val existingEpisode = getKey<DownloadObjects.DownloadEpisodeCached>(
+                            DOWNLOAD_EPISODE_CACHE,
+                            click.data.id.toString()
+                        )
+                        if (existingEpisode?.name == null) {
+                            android.util.Log.d("LocalLibraryTest", "Updating episode ${click.data.id} cache with name: ${click.data.name}")
+                            setKey(
+                                DOWNLOAD_EPISODE_CACHE,
+                                click.data.id.toString(),
+                                click.data.copy(cacheTime = System.currentTimeMillis())
+                            )
+                        }
+                    }
+
                     val episodes = getKeys(DOWNLOAD_EPISODE_CACHE)
                         ?.mapNotNull {
                             getKey<DownloadObjects.DownloadEpisodeCached>(it)
@@ -149,7 +167,7 @@ object DownloadButtonSetup {
                                 uri = Uri.EMPTY,
                                 id = it.id,
                                 parentId = it.parentId,
-                                name = it.name ?: act.getString(R.string.downloaded_file),
+                                name = it.name ?: "Episode ${it.episode}",
                                 season = it.season,
                                 episode = it.episode,
                                 headerName = parent.name,

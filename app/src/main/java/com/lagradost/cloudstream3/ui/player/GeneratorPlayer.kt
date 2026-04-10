@@ -47,6 +47,7 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.lagradost.cloudstream3.APIHolder.getApiFromNameNull
 import com.lagradost.cloudstream3.CloudStreamApp
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKey
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.setKey
 import com.lagradost.cloudstream3.CommonActivity.showToast
 import com.lagradost.cloudstream3.LoadResponse
@@ -104,8 +105,10 @@ import com.lagradost.cloudstream3.utils.AppContextUtils.html
 import com.lagradost.cloudstream3.utils.AppContextUtils.sortSubs
 import com.lagradost.cloudstream3.utils.Coroutines.ioSafe
 import com.lagradost.cloudstream3.utils.Coroutines.runOnMainThread
+import com.lagradost.cloudstream3.ui.result.VideoWatchState
 import com.lagradost.cloudstream3.utils.DataStoreHelper
 import com.lagradost.cloudstream3.utils.DataStoreHelper.getViewPos
+import com.lagradost.cloudstream3.utils.DataStoreHelper.getVideoWatchState
 import com.lagradost.cloudstream3.utils.EpisodeSkip
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -121,6 +124,12 @@ import com.lagradost.cloudstream3.utils.UIHelper.fixSystemBarsPadding
 import com.lagradost.cloudstream3.utils.UIHelper.hideSystemUI
 import com.lagradost.cloudstream3.utils.UIHelper.popCurrentPage
 import com.lagradost.cloudstream3.utils.UIHelper.toPx
+import com.lagradost.cloudstream3.utils.DOWNLOAD_EPISODE_CACHE
+import com.lagradost.cloudstream3.ui.player.loadCachedEpisode
+import com.lagradost.cloudstream3.ui.player.loadCachedHeader
+import com.lagradost.cloudstream3.ui.player.loadAllCachedEpisodes
+import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
+import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
 import com.lagradost.cloudstream3.utils.downloader.DownloadUtils.getImageBitmapFromUrl
 import com.lagradost.cloudstream3.utils.setText
 import com.lagradost.cloudstream3.utils.txt
@@ -508,12 +517,72 @@ class GeneratorPlayer : FullScreenPlayer() {
         currentSelectedLink = link
         currentMeta = viewModel.getMeta()
         nextMeta = viewModel.getNextMeta()
-        allMeta = viewModel.getAllMeta()?.filterIsInstance<ResultEpisode>()?.map { episode ->
-            // Refresh all the episodes watch duration
-            getViewPos(episode.id)?.let { data ->
-                episode.copy(position = data.position, duration = data.duration)
-            } ?: episode
-        }
+
+        // Support both ResultEpisode (online) and ExtractorUri (local) for episode overlay
+        val allEpisodes = viewModel.getAllMeta()
+        
+        // Check if we're playing a local file (ExtractorUri)
+        val isLocalPlayback = allEpisodes?.any { it is ExtractorUri } == true
+        
+        allMeta = if (isLocalPlayback) {
+            // For local playback, load ALL cached episodes for this show
+            val currentUri = allEpisodes?.firstOrNull { it is ExtractorUri } as? ExtractorUri
+            val parentId = currentUri?.parentId
+            
+            android.util.Log.d("EpisodeConverters", "Local playback detected, loading all cached episodes for parentId=$parentId")
+            
+            val cachedEpisodes = loadAllCachedEpisodes(parentId)
+            val cachedHeader = loadCachedHeader(parentId)
+            
+            android.util.Log.d("EpisodeConverters", "Loaded ${cachedEpisodes.size} cached episodes")
+            
+            cachedEpisodes.mapIndexed { index, cachedEp ->
+                // Convert cached episode to ResultEpisode
+                ResultEpisode(
+                    headerName = cachedHeader?.name ?: "",
+                    name = cachedEp.name ?: "Episode ${cachedEp.episode}",
+                    poster = cachedEp.poster,
+                    episode = cachedEp.episode,
+                    seasonIndex = cachedEp.season?.let { it - 1 },
+                    season = cachedEp.season,
+                    data = "",
+                    apiName = cachedHeader?.apiName ?: "Local",
+                    id = cachedEp.id,
+                    index = index,
+                    position = getViewPos(cachedEp.id)?.position ?: 0,
+                    duration = getViewPos(cachedEp.id)?.duration ?: 0,
+                    score = cachedEp.score,
+                    description = cachedEp.description,
+                    isFiller = null,
+                    tvType = cachedHeader?.type ?: TvType.Anime,
+                    parentId = cachedEp.parentId,
+                    videoWatchState = getVideoWatchState(cachedEp.id) ?: VideoWatchState.None,
+                    totalEpisodeIndex = cachedEp.episode
+                )
+            }
+        } else {
+            // Online playback - use ResultEpisode from provider
+            allEpisodes?.mapIndexed { index, meta ->
+                when (meta) {
+                    is ResultEpisode -> {
+                        // Online playback - use ResultEpisode with watch position
+                        getViewPos(meta.id)?.let { data ->
+                            meta.copy(position = data.position, duration = data.duration)
+                        } ?: meta
+                    }
+                    is ExtractorUri -> {
+                        // Fallback for mixed scenarios
+                        val cachedEpisode = loadCachedEpisode(meta.id)
+                        val cachedHeader = loadCachedHeader(meta.parentId)
+                        meta.toResultEpisode(index, cachedEpisode, cachedHeader)
+                    }
+                    else -> null
+                }
+            }
+        }?.filterNotNull()
+
+        android.util.Log.d("EpisodeConverters", "Episode overlay: allMeta size = ${allMeta?.size}, episodes = ${allMeta?.map { it.episode }}")
+
         //  setEpisodes(viewModel.getAllMeta() ?: emptyList())
         isActive = true
         setPlayerDimen(null)
@@ -1695,7 +1764,18 @@ class GeneratorPlayer : FullScreenPlayer() {
                     }
                 }
 
-                if (meta.tvType.isAnimeOp()) isOpVisible = percentage < SKIP_OP_VIDEO_PERCENTAGE
+                if (meta.tvType.isEpisodeBased()) {
+                    isOpVisible = percentage < SKIP_OP_VIDEO_PERCENTAGE
+                    android.util.Log.d("LocalLibraryTest", "Skip intro: tvType=${meta.tvType}, percentage=$percentage, isOpVisible=$isOpVisible")
+                }
+            }
+            
+            is ExtractorUri -> {
+                // Local playback uses ExtractorUri, enable skip intro for episode-based content
+                if (meta.tvType?.isEpisodeBased() == true) {
+                    isOpVisible = percentage < SKIP_OP_VIDEO_PERCENTAGE
+                    android.util.Log.d("LocalLibraryTest", "Skip intro (local): tvType=${meta.tvType}, percentage=$percentage, isOpVisible=$isOpVisible")
+                }
             }
         }
 
@@ -2072,7 +2152,7 @@ class GeneratorPlayer : FullScreenPlayer() {
 
     override fun isThereEpisodes(): Boolean {
         val meta = allMeta
-        return !meta.isNullOrEmpty() && meta.size > 1
+        return !meta.isNullOrEmpty()
     }
 
     override fun showEpisodesOverlay() {

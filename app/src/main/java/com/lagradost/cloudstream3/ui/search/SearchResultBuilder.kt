@@ -132,8 +132,25 @@ object SearchResultBuilder {
         cardText?.text = card.name
         cardText?.isVisible = showTitle
         cardView.isVisible = true
-        if (!card.posterUrl.isNullOrEmpty()) {
-            cardView.loadImage(card.posterUrl, card.posterHeaders) {
+        
+        // Check if this is a library item with a custom poster
+        val posterToLoad = if (card is com.lagradost.cloudstream3.syncproviders.SyncAPI.LibraryItem && card.url != null) {
+            val cachedHeader = com.lagradost.cloudstream3.CloudStreamApp.getKey<com.lagradost.cloudstream3.utils.downloader.DownloadObjects.DownloadHeaderCached>(
+                com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE,
+                card.url
+            )
+            if (cachedHeader?.hasCustomPoster == true && !cachedHeader.poster.isNullOrEmpty()) {
+                android.util.Log.d("MetadataSwap", "SearchResultBuilder - Using custom poster for library item: ${card.name}, custom poster: ${cachedHeader.poster}")
+                cachedHeader.poster
+            } else {
+                card.posterUrl
+            }
+        } else {
+            card.posterUrl
+        }
+        
+        if (!posterToLoad.isNullOrEmpty()) {
+            cardView.loadImage(posterToLoad, card.posterHeaders) {
                 error { getImageFromDrawable(itemView.context, R.drawable.default_cover) }
             }
         } else cardView.loadImage(R.drawable.default_cover)

@@ -390,6 +390,12 @@ class SettingsGeneral : BasePreferenceFragmentCompat() {
             return@setOnPreferenceClickListener true
         }
 
+        // Cache Management
+        findPreference<androidx.preference.Preference>("cache_management_key")?.setOnPreferenceClickListener {
+            activity?.navigate(R.id.action_navigation_settings_general_to_cacheManagementFragment)
+            return@setOnPreferenceClickListener true
+        }
+
         try {
             beneneCount =
                 settingsManager.getInt(getString(R.string.benene_count), 0)

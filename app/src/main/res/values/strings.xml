@@ -100,6 +100,7 @@
     <string name="action_remove_from_bookmarks">Remove</string>
     <string name="action_add_to_bookmarks">Set watch status</string>
     <string name="sort_apply">Apply</string>
+    <string name="sort_cache_first">Cache First</string>
     <string name="sort_copy">Copy</string>
     <string name="sort_close">Close</string>
     <string name="sort_clear">Clear</string>
@@ -129,6 +130,7 @@
     <string name="subs_hold_to_reset_to_default">Hold to reset to default</string>
     <string name="subs_import_text" formatted="true">Import fonts by placing them in %s</string>
     <string name="continue_watching">Continue Watching</string>
+    <string name="action_continue">Continue</string>
     <string name="action_remove_watching">Remove</string>
     <string name="action_open_watching">More Info</string>
     <string name="action_open_play">@string/home_play </string>
@@ -379,6 +381,11 @@
     <string name="app_layout">App Layout</string>
     <string name="preferred_media_settings">Preferred media</string>
     <string name="enable_nsfw_on_providers">Enable NSFW on supported Extensions</string>
+    <string name="auto_metadata_fetch">Automatic metadata fetching</string>
+    <string name="auto_metadata_fetch_summary">Automatically fetch missing metadata from AniList sync when loading shows</string>
+    <string name="metadata_provider">Metadata provider</string>
+    <string name="refresh_metadata">Refresh metadata</string>
+    <string name="refresh_metadata_summary">Fetch metadata from AniList sync for this show</string>
     <string name="subtitles_encoding">Subtitle encoding</string>
     <string name="category_providers">Providers</string>
     <string name="category_provider_test">Provider test</string>
@@ -744,6 +751,8 @@
     <string name="overscan_settings">Overscan</string>
     <string name="poster_size_settings_des">Changes size of posters</string>
     <string name="poster_size_settings">Poster size</string>
+    <string name="library_poster_size_settings_des">Changes size of library posters</string>
+    <string name="library_poster_size_settings">Library poster size</string>
     <string name="speedup_title">LongPress Speed Toggle</string>
     <string name="speedup_summary">Hold to get 2x speed</string>
     <string name="edit_profile_image_title">Edit Profile Image</string>

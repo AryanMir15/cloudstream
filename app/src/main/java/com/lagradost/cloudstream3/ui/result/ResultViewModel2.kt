@@ -10,14 +10,19 @@ import androidx.lifecycle.LiveData
 import androidx.lifecycle.MutableLiveData
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.actions.AlwaysAskAction
 import com.lagradost.cloudstream3.actions.VideoClickActionHolder
 import com.lagradost.cloudstream3.APIHolder.apis
 import com.lagradost.cloudstream3.APIHolder.getApiFromNameNull
+import com.lagradost.cloudstream3.APIHolder.getApiFromUrlNull
 import com.lagradost.cloudstream3.APIHolder.unixTime
 import com.lagradost.cloudstream3.APIHolder.unixTimeMS
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.context
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKey
+import com.lagradost.cloudstream3.CloudStreamApp.Companion.getKeys
 import com.lagradost.cloudstream3.CloudStreamApp.Companion.setKey
 import com.lagradost.cloudstream3.CommonActivity.activity
 import com.lagradost.cloudstream3.CommonActivity.getCastSession
@@ -54,6 +59,10 @@ import com.lagradost.cloudstream3.ui.player.LOADTYPE_INAPP_DOWNLOAD
 import com.lagradost.cloudstream3.ui.player.RepoLinkGenerator
 import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter.Companion.getPlayerAction
+import com.lagradost.cloudstream3.ui.result.EpisodeClickEvent
+import com.lagradost.cloudstream3.ui.result.START_ACTION_LOAD_EP
+import com.lagradost.cloudstream3.ui.result.START_ACTION_RESUME_LATEST
+import com.lagradost.cloudstream3.ui.result.getWatchProgress
 import com.lagradost.cloudstream3.utils.AppContextUtils.getNameFull
 import com.lagradost.cloudstream3.utils.AppContextUtils.isConnectedToChromecast
 import com.lagradost.cloudstream3.utils.AppContextUtils.setDefaultFocus
@@ -63,6 +72,7 @@ import com.lagradost.cloudstream3.utils.Coroutines.ioSafe
 import com.lagradost.cloudstream3.utils.Coroutines.ioWork
 import com.lagradost.cloudstream3.utils.Coroutines.ioWorkSafe
 import com.lagradost.cloudstream3.utils.Coroutines.main
+import com.lagradost.cloudstream3.utils.DOWNLOAD_EPISODE_CACHE
 import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
 import com.lagradost.cloudstream3.utils.DataStore
 import com.lagradost.cloudstream3.utils.DataStore.editor
@@ -95,6 +105,8 @@ import com.lagradost.cloudstream3.utils.DataStoreHelper.setResultWatchState
 import com.lagradost.cloudstream3.utils.DataStoreHelper.setSubscribedData
 import com.lagradost.cloudstream3.utils.DataStoreHelper.setVideoWatchState
 import com.lagradost.cloudstream3.utils.DataStoreHelper.updateSubscribedData
+import com.lagradost.cloudstream3.utils.RESULT_EPISODE
+import com.lagradost.cloudstream3.utils.RESULT_SEASON
 import com.lagradost.cloudstream3.utils.Editor
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -106,7 +118,11 @@ import com.lagradost.cloudstream3.utils.UiText
 import com.lagradost.cloudstream3.utils.VIDEO_WATCH_STATE
 import com.lagradost.cloudstream3.utils.downloader.DownloadFileManagement.sanitizeFilename
 import com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.getDownloadEpisodeMetadata
+import com.lagradost.cloudstream3.ui.download.DOWNLOAD_ACTION_PLAY_FILE
+import com.lagradost.cloudstream3.ui.download.DownloadButtonSetup
+import com.lagradost.cloudstream3.ui.download.DownloadClickEvent
 import com.lagradost.cloudstream3.utils.downloader.DownloadObjects
+import com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager
 import com.lagradost.cloudstream3.utils.downloader.DownloadUtils.downloadSubtitle
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
@@ -130,6 +146,15 @@ data class EpisodeRange(
     val startEpisode: Int,
     val endEpisode: Int,
 )
+
+enum class MetadataField(val displayName: String) {
+    PLOT("Plot"),
+    POSTER("Poster"),
+    ACTORS("Actors"),
+    SCORE("Score"),
+    STATUS("Status"),
+    YEAR("Year")
+}
 
 data class AutoResume(
     val season: Int?,
@@ -206,7 +231,8 @@ fun LoadResponse.toResultData(repo: APIRepository): ResultData {
         "Api returned wrong apiName"
     }
 
-    val hasActorImages = actors?.firstOrNull()?.actor?.image?.isNotBlank() == true
+    val actorsList = actors
+    val hasActorImages = actorsList?.isNotEmpty() == true && actorsList.firstOrNull()?.actor?.image?.isNotBlank() == true
 
     var nextAiringEpisode: UiText? = null
     var nextAiringDate: UiText? = null
@@ -268,10 +294,10 @@ fun LoadResponse.toResultData(repo: APIRepository): ResultData {
         url = url,
         tags = tags ?: emptyList(),
         comingSoon = comingSoon,
-        actors = if (hasActorImages) actors else null,
-        actorsText = if (hasActorImages || actors.isNullOrEmpty()) null else txt(
+        actors = if (hasActorImages) actorsList else null,
+        actorsText = if (hasActorImages) null else if (actorsList.isNullOrEmpty()) null else txt(
             R.string.cast_format,
-            actors?.joinToString { it.actor.name }),
+            actorsList?.joinToString { it.actor.name }),
         plotText =
             if (plot.isNullOrBlank()) txt(if (this is TorrentLoadResponse) R.string.torrent_no_plot else R.string.normal_no_plot) else txt(
                 plot!!
@@ -318,6 +344,14 @@ fun LoadResponse.toResultData(repo: APIRepository): ResultData {
             secondsToReadable(dur * 60, "0 mins")
         ),
         onGoingText = if (this is EpisodeResponse) {
+            txt(
+                when (showStatus) {
+                    ShowStatus.Ongoing -> R.string.status_ongoing
+                    ShowStatus.Completed -> R.string.status_completed
+                    else -> null
+                }
+            )
+        } else if (this is ResultViewModel2.LoadResponseFromSearch) {
             txt(
                 when (showStatus) {
                     ShowStatus.Ongoing -> R.string.status_ongoing
@@ -427,13 +461,37 @@ data class ExtractedTrailerData(
 )
 
 class ResultViewModel2 : ViewModel() {
-    private var currentResponse: LoadResponse? = null
+    var currentResponse: LoadResponse? = null
+    var originalResponse: LoadResponse? = null
+    private val _isMetadataSwapMode = MutableLiveData(false)
+    val isMetadataSwapMode: LiveData<Boolean> = _isMetadataSwapMode
     var EPISODE_RANGE_SIZE: Int = 20
+
     fun clear() {
         currentResponse = null
+        originalResponse = null
+        _isMetadataSwapMode.postValue(false)
         _page.postValue(null)
     }
 
+    fun setMetadataSwapMode(enabled: Boolean) {
+        _isMetadataSwapMode.postValue(enabled)
+    }
+
+    fun swapAllMetadata(target: LoadResponse, source: LoadResponse, fieldsToSwap: Set<MetadataField> = setOf(*MetadataField.values())): LoadResponse {
+        android.util.Log.d("MetadataSwap", "swapAllMetadata called - target: ${target.name}, source: ${source.name}, fieldsToSwap: $fieldsToSwap")
+        android.util.Log.d("MetadataSwap", "swapAllMetadata - target actors: ${(target as? AnimeLoadResponse)?.actors?.size ?: (target as? TvSeriesLoadResponse)?.actors?.size}, source actors: ${(source as? AnimeLoadResponse)?.actors?.size ?: (source as? TvSeriesLoadResponse)?.actors?.size}")
+        android.util.Log.d("MetadataSwap", "swapAllMetadata - target plot: ${(target as? AnimeLoadResponse)?.plot?.take(30) ?: (target as? TvSeriesLoadResponse)?.plot?.take(30)}, source plot: ${(source as? AnimeLoadResponse)?.plot?.take(30) ?: (source as? TvSeriesLoadResponse)?.plot?.take(30)}")
+        val result = mergeMetadataFromLoadResponse(target, source, fieldsToMerge = fieldsToSwap)
+        android.util.Log.d("MetadataSwap", "swapAllMetadata - result actors: ${(result as? AnimeLoadResponse)?.actors?.size ?: (result as? TvSeriesLoadResponse)?.actors?.size}, result plot: ${(result as? AnimeLoadResponse)?.plot?.take(30) ?: (result as? TvSeriesLoadResponse)?.plot?.take(30)}")
+        return result
+    }
+
+    fun hasLoaded(): Boolean {
+        return _page.value != null
+    }
+
+    
     data class EpisodeIndexer(
         val dubStatus: DubStatus,
         val season: Int,
@@ -467,6 +525,9 @@ class ResultViewModel2 : ViewModel() {
 
     private val _episodes: MutableLiveData<Resource<List<ResultEpisode>>?> =
         MutableLiveData(Resource.Loading())
+
+    val _metadataLoading: MutableLiveData<Boolean> = MutableLiveData(false)
+    val metadataLoading: LiveData<Boolean> = _metadataLoading
     val episodes: LiveData<Resource<List<ResultEpisode>>?> = _episodes
 
     private val _movie: MutableLiveData<Resource<Pair<UiText, ResultEpisode>>?> =
@@ -549,6 +610,9 @@ class ResultViewModel2 : ViewModel() {
 
     companion object {
         const val TAG = "RVM2"
+        var sharedOriginalResponse: LoadResponse? = null
+        var sharedSwappedResponse: LoadResponse? = null
+        var isMetadataSwapActive: Boolean = false
         //private const val EPISODE_RANGE_SIZE = 20
         //private const val EPISODE_RANGE_OVERLOAD = 30
 
@@ -1393,10 +1457,264 @@ class ResultViewModel2 : ViewModel() {
                             click.copy(action = ACTION_CHROME_CAST_EPISODE)
                         )
                     } else {
-                        val action = getPlayerAction(ctx)
-                        handleEpisodeClickEvent(
-                            click.copy(action = action)
+                        // Check if the episode is downloaded locally
+                        var fileInfo = VideoDownloadManager.getDownloadFileInfo(
+                            ctx,
+                            click.data.id
                         )
+                        var length = fileInfo?.fileLength ?: 0
+                        
+                        // Validate that cached file belongs to current show
+                        // Episode IDs can be same across shows, so verify path matches
+                        if (length > 0 && fileInfo != null) {
+                            val expectedFolder = com.lagradost.cloudstream3.utils.downloader.DownloadFileManagement.getFolder(
+                                currentResponse?.type ?: TvType.Anime,
+                                currentResponse?.name ?: "Unknown"
+                            )
+                            val cachedPath = fileInfo.path.toString()
+                            if (!cachedPath.contains(expectedFolder, ignoreCase = true)) {
+                                android.util.Log.d("LocalLibraryTest", "Cached file doesn't match current show! Expected: $expectedFolder, Got: $cachedPath")
+                                // Clear stale cache
+                                CloudStreamApp.removeKey(VideoDownloadManager.KEY_DOWNLOAD_INFO, click.data.id.toString())
+                                fileInfo = null
+                                length = 0
+                            }
+                        }
+                        
+                        // FALLBACK FOR LOCAL LIBRARY: If VideoDownloadManager failed (e.g. database got wiped), 
+                        // manually check if the file exists in the standard local library folder.
+                        if (length <= 0) {
+                            try {
+                                // Use the app's configured download path from settings
+                                val (baseFile, basePath) = with(ctx) {
+                                    com.lagradost.cloudstream3.utils.downloader.DownloadFileManagement.run {
+                                        getBasePath()
+                                    }
+                                }
+                                
+                                // Use DownloadFileManagement to construct the correct folder path
+                                val folderPath = com.lagradost.cloudstream3.utils.downloader.DownloadFileManagement.getFolder(
+                                    currentResponse?.type ?: TvType.Anime,
+                                    currentResponse?.name ?: "Unknown"
+                                )
+                                
+                                android.util.Log.d("LocalLibraryTest", "Attempting manual check. Base file: ${baseFile?.filePath()} | Folder path: $folderPath")
+                                
+                                // Navigate to the folder using SafeFile
+                                val targetDir = baseFile?.gotoDirectory(folderPath, false)
+                                
+                                android.util.Log.d("LocalLibraryTest", "Target dir exists: ${targetDir?.exists()}")
+                                
+                                if (targetDir != null && targetDir.exists() == true) {
+                                    // List all files in the directory using SafeFile API
+                                    val allFiles = targetDir.listFiles()
+                                    val fileNames = allFiles?.map { it.name() }?.joinToString(", ")
+                                    android.util.Log.d("LocalLibraryTest", "Files found: $fileNames")
+                                    
+                                    // Smart detection: Find file matching episode number
+                                    val targetEpisode = click.data.episode
+                                    val targetSeason = click.data.season
+                                    
+                                    val matchingFile = allFiles?.firstOrNull { file ->
+                                        val name = file.name() ?: return@firstOrNull false
+                                        val lowerName = name.lowercase()
+                                        
+                                        android.util.Log.d("LocalLibraryTest", "Checking file: $name against episode $targetEpisode")
+                                        
+                                        // Pattern 1: Episode X (any format)
+                                        val hasEpisode = lowerName.contains("episode $targetEpisode") ||
+                                                        lowerName.contains("episode${targetEpisode}") ||
+                                                        lowerName.matches(Regex(".*[^0-9]${targetEpisode}[^0-9].*"))
+                                        
+                                        // Pattern 2: S01E01 format
+                                        val seasonEpPattern = if (targetSeason != null) {
+                                            lowerName.contains("s${targetSeason}e$targetEpisode")
+                                        } else false
+                                        
+                                        // Pattern 3: Just the number at start
+                                        val startsWithEp = lowerName.startsWith("$targetEpisode.") ||
+                                                          lowerName.startsWith("$targetEpisode ")
+                                        
+                                        val matched = hasEpisode || seasonEpPattern || startsWithEp
+                                        if (matched) {
+                                            android.util.Log.d("LocalLibraryTest", "Matched file: $name")
+                                        }
+                                        matched
+                                    }
+                                    
+                                    if (matchingFile != null && matchingFile.exists() == true) {
+                                        length = matchingFile.length() ?: 0L
+                                        android.util.Log.d("LocalLibraryTest", "Smart match found: ${matchingFile.name()} with length: $length")
+                                        
+                                        // Create a temporary DownloadedFileInfo for playback
+                                        CloudStreamApp.setKey(
+                                            VideoDownloadManager.KEY_DOWNLOAD_INFO,
+                                            click.data.id.toString(),
+                                            DownloadObjects.DownloadedFileInfo(
+                                                totalBytes = length,
+                                                relativePath = folderPath,
+                                                displayName = matchingFile.name() ?: "episode_$targetEpisode.mp4",
+                                                basePath = basePath,
+                                                linkHash = 0
+                                            )
+                                        )
+                                        
+                                        // Also cache episode info for next episode navigation
+                                        val parentId = click.data.parentId ?: currentResponse?.getId() ?: 0
+                                        android.util.Log.d("LocalLibraryTest", "Caching episode - id: ${click.data.id}, name: ${click.data.name}, airDate: ${click.data.airDate}, score: ${click.data.score}")
+                                        CloudStreamApp.setKey(
+                                            DOWNLOAD_EPISODE_CACHE,
+                                            click.data.id.toString(),
+                                            DownloadObjects.DownloadEpisodeCached(
+                                                name = click.data.name ?: "Episode ${click.data.episode}",
+                                                poster = click.data.poster,
+                                                episode = click.data.episode,
+                                                season = click.data.season,
+                                                id = click.data.id,
+                                                parentId = parentId,
+                                                score = click.data.score,
+                                                description = click.data.description,
+                                                date = click.data.airDate,
+                                                cacheTime = System.currentTimeMillis()
+                                            )
+                                        )
+                                        
+                                        // Cache header info for the series
+                                        val response = currentResponse
+                                        val cachedScore = response?.score?.toInt()
+                                        val cachedShowStatus = if (response is AnimeLoadResponse) response.showStatus?.name else if (response is TvSeriesLoadResponse) response.showStatus?.name else if (response is LoadResponseFromSearch) response.showStatus?.name else null
+                                        val cachedYear = response?.year
+                                        val cachedActors = response?.actors?.map { actorData ->
+                                            "${actorData.actor.name}|${actorData.actor.image}|${actorData.role?.name}|${actorData.roleString}|${actorData.voiceActor?.name}|${actorData.voiceActor?.image}"
+                                        }
+                                        android.util.Log.d("LocalLibraryTest", "Caching header - score: $cachedScore, showStatus: $cachedShowStatus, year: $cachedYear, actors: $cachedActors")
+                                        CloudStreamApp.setKey(
+                                            DOWNLOAD_HEADER_CACHE,
+                                            parentId.toString(),
+                                            DownloadObjects.DownloadHeaderCached(
+                                                apiName = response?.apiName ?: "Local",
+                                                url = response?.url ?: "",
+                                                type = response?.type ?: TvType.Anime,
+                                                name = response?.name ?: "Unknown",
+                                                poster = response?.posterUrl,
+                                                plot = response?.plot,
+                                                score = cachedScore,
+                                                showStatus = cachedShowStatus,
+                                                year = cachedYear,
+                                                episodeCount = if (response is AnimeLoadResponse) response.episodes.values.flatten().size else if (response is TvSeriesLoadResponse) response.episodes.size else null,
+                                                date = null,
+                                                actors = cachedActors,
+                                                cacheTime = System.currentTimeMillis(),
+                                                id = parentId
+                                            )
+                                        )
+                                    } else {
+                                        // Try alternative file name patterns
+                                        val fallbackNames = listOf(
+                                            "Episode ${click.data.episode}.mp4",
+                                            "${click.data.episode}.mp4",
+                                            if (click.data.season != null) "S${click.data.season}E${click.data.episode}.mp4" else null
+                                        ).filterNotNull()
+                                        
+                                        for (fallbackName in fallbackNames) {
+                                            val fallbackFile = targetDir.findFile(fallbackName)
+                                            if (fallbackFile != null && fallbackFile.exists() == true) {
+                                                length = fallbackFile.length() ?: 0L
+                                                android.util.Log.d("LocalLibraryTest", "Found file with fallback name: ${fallbackFile.name()}")
+                                                
+                                                CloudStreamApp.setKey(
+                                                    VideoDownloadManager.KEY_DOWNLOAD_INFO,
+                                                    click.data.id.toString(),
+                                                    DownloadObjects.DownloadedFileInfo(
+                                                        totalBytes = length,
+                                                        relativePath = folderPath,
+                                                        displayName = fallbackFile.name() ?: fallbackName,
+                                                        basePath = baseFile.filePath() ?: "",
+                                                        linkHash = 0
+                                                    )
+                                                )
+                                                
+                                                // Also cache episode info for next episode navigation
+                                                val parentId = click.data.parentId ?: currentResponse?.getId() ?: 0
+                                                CloudStreamApp.setKey(
+                                                    DOWNLOAD_EPISODE_CACHE,
+                                                    click.data.id.toString(),
+                                                    DownloadObjects.DownloadEpisodeCached(
+                                                        name = click.data.name ?: "Episode ${click.data.episode}",
+                                                        poster = click.data.poster,
+                                                        episode = click.data.episode,
+                                                        season = click.data.season,
+                                                        id = click.data.id,
+                                                        parentId = parentId,
+                                                        score = click.data.score,
+                                                        description = click.data.description,
+                                                        date = click.data.airDate,
+                                                        cacheTime = System.currentTimeMillis()
+                                                    )
+                                                )
+                                                
+                                                // Cache header info for the series
+                                                val response = currentResponse
+                                                CloudStreamApp.setKey(
+                                                    DOWNLOAD_HEADER_CACHE,
+                                                    parentId.toString(),
+                                                    DownloadObjects.DownloadHeaderCached(
+                                                        apiName = response?.apiName ?: "Local",
+                                                        url = response?.url ?: "",
+                                                        type = response?.type ?: TvType.Anime,
+                                                        name = response?.name ?: "Unknown",
+                                                        poster = response?.posterUrl,
+                                                        plot = response?.plot,
+                                                        score = response?.score?.toInt(),
+                                                        showStatus = if (response is AnimeLoadResponse) response.showStatus?.name else if (response is TvSeriesLoadResponse) response.showStatus?.name else if (response is LoadResponseFromSearch) response.showStatus?.name else null,
+                                                        year = response?.year,
+                                                        episodeCount = if (response is AnimeLoadResponse) response.episodes.values.flatten().size else if (response is TvSeriesLoadResponse) response.episodes.size else null,
+                                                        date = null,
+                                                        actors = null,
+                                                        cacheTime = System.currentTimeMillis(),
+                                                        id = parentId
+                                                    )
+                                                )
+                                                break
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                android.util.Log.e("LocalLibraryTest", "Error during manual file check", e)
+                                e.printStackTrace()
+                            }
+                        }
+                        
+                        android.util.Log.d("LocalLibraryTest", "Clicking episode ${click.data.id}. Found fileInfo: $fileInfo. Length: $length")
+                        
+                        if (length > 0) {
+                            android.util.Log.d("LocalLibraryTest", "Playing local file via DownloadButtonSetup for episode ${click.data.id}")
+                            // If downloaded, simulate the click that plays the downloaded file
+                            DownloadButtonSetup.handleDownloadClick(
+                                DownloadClickEvent(
+                                    DOWNLOAD_ACTION_PLAY_FILE,
+                                    DownloadObjects.DownloadEpisodeCached(
+                                        name = click.data.name ?: "Episode ${click.data.episode}",
+                                        poster = click.data.poster,
+                                        episode = click.data.episode,
+                                        season = click.data.season,
+                                        id = click.data.id,
+                                        parentId = click.data.parentId ?: currentResponse?.getId() ?: 0,
+                                        score = click.data.score,
+                                        description = click.data.description,
+                                        date = click.data.airDate,
+                                        cacheTime = System.currentTimeMillis(),
+                                    )
+                                )
+                            )
+                        } else {
+                            android.util.Log.d("LocalLibraryTest", "No local file found for episode ${click.data.id}. Falling back to online player.")
+                            val action = getPlayerAction(ctx)
+                            handleEpisodeClickEvent(
+                                click.copy(action = action)
+                            )
+                        }
                     }
                 }
             }
@@ -1637,6 +1955,226 @@ class ResultViewModel2 : ViewModel() {
         }
     }
 
+    suspend fun fetchMetadataFromProvider(
+        providerName: String,
+        name: String,
+        year: Int?,
+        type: TvType
+    ): LoadResponse? {
+        android.util.Log.d("MetadataSwap", "fetchMetadataFromProvider called - provider: $providerName, name: $name, year: $year, type: $type")
+        Log.i(TAG, "fetchMetadataFromProvider called - provider: $providerName, name: $name, year: $year, type: $type")
+        val providerApi = synchronized(apis) {
+            apis.find { it.name == providerName }
+        }
+        if (providerApi == null) {
+            android.util.Log.e("MetadataSwap", "$providerName API not found in apis list. Available APIs: ${apis.map { "${it.name} (${it.providerType})" }}")
+            Log.e(TAG, "$providerName API not found in apis list. Available APIs: ${apis.map { "${it.name} (${it.providerType})" }}")
+            return null
+        }
+        android.util.Log.d("MetadataSwap", "$providerName API found: ${providerApi.name} (${providerApi.providerType})")
+        Log.i(TAG, "$providerName API found: ${providerApi.name} (${providerApi.providerType})")
+
+        return try {
+            android.util.Log.d("MetadataSwap", "Calling providerApi.search with name: $name")
+            val searchResults = try {
+                providerApi.search(name)
+            } catch (e: NotImplementedError) {
+                android.util.Log.w("MetadataSwap", "$providerName does not implement search, skipping metadata fetch")
+                Log.w(TAG, "$providerName does not implement search, skipping metadata fetch")
+                return null
+            }
+            android.util.Log.d("MetadataSwap", "$providerName search results: ${searchResults?.size} results")
+            Log.i(TAG, "$providerName search results: ${searchResults?.size} results")
+            searchResults?.forEach { 
+                android.util.Log.d("MetadataSwap", "  - ${it.name} (type: ${it.type})")
+                Log.i(TAG, "  - ${it.name} (type: ${it.type})") 
+            }
+
+            android.util.Log.d("MetadataSwap", "Finding best match for name: $name, type: $type")
+            val bestMatch = searchResults?.firstOrNull { result ->
+                val nameMatch = result.name.equals(name, ignoreCase = true)
+                val typeMatch = type == TvType.Movie || result.type == type
+                android.util.Log.d("MetadataSwap", "Checking match: ${result.name} vs $name (nameMatch: $nameMatch), type: ${result.type} vs $type (typeMatch: $typeMatch)")
+                Log.i(TAG, "Checking match: ${result.name} vs $name (nameMatch: $nameMatch), type: ${result.type} vs $type (typeMatch: $typeMatch)")
+                nameMatch && typeMatch
+            }
+
+            if (bestMatch != null) {
+                android.util.Log.d("MetadataSwap", "Best match found: ${bestMatch.name}, loading from URL: ${bestMatch.url}")
+                Log.i(TAG, "Best match found: ${bestMatch.name}, loading from URL: ${bestMatch.url}")
+                android.util.Log.d("MetadataSwap", "Calling providerApi.load with URL: ${bestMatch.url}")
+                val loadResponse = providerApi.load(bestMatch.url)
+                val actorsCount = (loadResponse as? AnimeLoadResponse)?.actors?.size ?: (loadResponse as? TvSeriesLoadResponse)?.actors?.size
+                val plotPreview = (loadResponse as? AnimeLoadResponse)?.plot?.take(30) ?: (loadResponse as? TvSeriesLoadResponse)?.plot?.take(30)
+                android.util.Log.d("MetadataSwap", "$providerName load result: ${loadResponse?.name}, actors: $actorsCount, plot: $plotPreview")
+                Log.i(TAG, "$providerName load result: ${loadResponse?.name}, actors: $actorsCount, plot: $plotPreview")
+                loadResponse
+            } else {
+                android.util.Log.w("MetadataSwap", "No matching result found for: $name")
+                Log.w(TAG, "No matching result found for: $name")
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MetadataSwap", "Exception in fetchMetadataFromProvider: ${e.message}", e)
+            Log.e(TAG, "Exception in fetchMetadataFromProvider: ${e.message}", e)
+            null
+        }
+    }
+
+    fun mergeMetadataFromLoadResponse(
+        target: LoadResponse,
+        source: LoadResponse,
+        fieldsToMerge: Set<MetadataField> = setOf(*MetadataField.values())
+    ): LoadResponse {
+        android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse called - target: ${target.name}, source: ${source.name}")
+        android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - fieldsToMerge: $fieldsToMerge")
+        return target.apply {
+            if (MetadataField.POSTER in fieldsToMerge) {
+                android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - merging POSTER - target.posterUrl: ${posterUrl?.take(30)}, source.posterUrl: ${source.posterUrl?.take(30)}")
+                posterUrl = source.posterUrl  // Always swap, don't check if target is blank
+                android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - after POSTER merge - posterUrl: ${posterUrl?.take(30)}")
+            }
+            if (MetadataField.PLOT in fieldsToMerge) {
+                android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - merging PLOT - target.plot: ${plot?.take(30)}, source.plot: ${source.plot?.take(30)}")
+                plot = source.plot  // Always swap, don't check if target is blank
+                android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - after PLOT merge - plot: ${plot?.take(30)}")
+            }
+            if (MetadataField.ACTORS in fieldsToMerge) {
+                if (this is AnimeLoadResponse && source is AnimeLoadResponse) {
+                    android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - merging ACTORS (Anime) - target.actors: ${actors?.size}, source.actors: ${source.actors?.size}")
+                    actors = source.actors  // Always swap, don't check if target is null
+                    android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - after ACTORS merge - actors: ${actors?.size}")
+                } else if (this is TvSeriesLoadResponse && source is TvSeriesLoadResponse) {
+                    android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - merging ACTORS (TvSeries) - target.actors: ${actors?.size}, source.actors: ${source.actors?.size}")
+                    actors = source.actors  // Always swap, don't check if target is null
+                    android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - after ACTORS merge - actors: ${actors?.size}")
+                }
+            }
+            if (MetadataField.SCORE in fieldsToMerge) {
+                android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - merging SCORE - target.score: $score, source.score: ${source.score}")
+                score = source.score  // Always swap, don't check if target is null
+                android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - after SCORE merge - score: $score")
+            }
+            if (MetadataField.YEAR in fieldsToMerge) {
+                android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - merging YEAR - target.year: $year, source.year: ${source.year}")
+                year = source.year  // Always swap, don't check if target is null
+                android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - after YEAR merge - year: $year")
+            }
+            if (MetadataField.STATUS in fieldsToMerge) {
+                if (this is AnimeLoadResponse && source is AnimeLoadResponse) {
+                    android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - merging STATUS (Anime) - target.showStatus: $showStatus, source.showStatus: ${source.showStatus}")
+                    showStatus = source.showStatus  // Always swap, don't check if target is null
+                    android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - after STATUS merge - showStatus: $showStatus")
+                } else if (this is TvSeriesLoadResponse && source is TvSeriesLoadResponse) {
+                    android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - merging STATUS (TvSeries) - target.showStatus: $showStatus, source.showStatus: ${source.showStatus}")
+                    showStatus = source.showStatus  // Always swap, don't check if target is null
+                    android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - after STATUS merge - showStatus: $showStatus")
+                }
+            }
+            // Tags are always merged for now
+            android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - merging TAGS - target.tags: ${tags?.size}, source.tags: ${source.tags?.size}")
+            tags = source.tags  // Always swap, don't check if target is null
+            android.util.Log.d("MetadataSwap", "mergeMetadataFromLoadResponse - after TAGS merge - tags: ${tags?.size}")
+        }
+    }
+
+    fun getAvailableMetaProviders(): List<String> {
+        return synchronized(apis) {
+            apis.map { it.name }
+        }
+    }
+
+    fun refreshMetadata(providerName: String? = null, fieldsToMerge: Set<MetadataField> = setOf(*MetadataField.values())) {
+        viewModelScope.launchSafe {
+            currentResponse?.let { response ->
+                Log.i(TAG, "Manual metadata refresh for: ${response.name}")
+
+                // If no provider specified, show selection UI
+                if (providerName == null) {
+                    val metaProviders = getAvailableMetaProviders()
+                    if (metaProviders.isEmpty()) {
+                        Log.w(TAG, "No MetaProviders available")
+                        return@launchSafe
+                    }
+
+                    // This will be handled by the UI layer calling refreshMetadata with a provider
+                    Log.i(TAG, "Available MetaProviders: $metaProviders")
+                    return@launchSafe
+                }
+
+                // Fetch metadata with 30-second timeout
+                val metadata = try {
+                    withTimeout(30_000) {
+                        fetchMetadataFromProvider(providerName, response.name, null, response.type)
+                    }
+                } catch (e: TimeoutCancellationException) {
+                    Log.e(TAG, "Request took too long to respond")
+                    null
+                } catch (e: Exception) {
+                    Log.e(TAG, "Exception fetching metadata: ${e.message}", e)
+                    null
+                }
+
+                if (metadata != null) {
+                    val actorsCount = (metadata as? AnimeLoadResponse)?.actors?.size ?: (metadata as? TvSeriesLoadResponse)?.actors?.size
+                    val plotPreview = (metadata as? AnimeLoadResponse)?.plot?.take(30) ?: (metadata as? TvSeriesLoadResponse)?.plot?.take(30)
+                    Log.i(TAG, "Successfully refreshed metadata from $providerName - actors: $actorsCount, plot: $plotPreview")
+                    val mergedResponse = mergeMetadataFromLoadResponse(response, metadata, fieldsToMerge)
+                    
+                    // Handle poster and actors separately since they're not in merge function
+                    if (MetadataField.POSTER in fieldsToMerge) {
+                        mergedResponse.posterUrl = metadata.posterUrl
+                    }
+                    if (MetadataField.ACTORS in fieldsToMerge) {
+                        if (mergedResponse is AnimeLoadResponse && metadata is AnimeLoadResponse) {
+                            mergedResponse.actors = metadata.actors
+                        } else if (mergedResponse is TvSeriesLoadResponse && metadata is TvSeriesLoadResponse) {
+                            mergedResponse.actors = metadata.actors
+                        }
+                    }
+                    
+                    currentResponse = mergedResponse
+
+                    // Update cache with new metadata and poster
+                    currentId?.let { id ->
+                        val mergedActors = (mergedResponse as? AnimeLoadResponse)?.actors ?: (mergedResponse as? TvSeriesLoadResponse)?.actors
+                        val mergedPlot = (mergedResponse as? AnimeLoadResponse)?.plot ?: (mergedResponse as? TvSeriesLoadResponse)?.plot
+                        val mergedPoster = mergedResponse.posterUrl
+
+                        setKey(
+                            DOWNLOAD_HEADER_CACHE,
+                            id.toString(),
+                            DownloadObjects.DownloadHeaderCached(
+                                apiName = mergedResponse.apiName,
+                                url = mergedResponse.url,
+                                type = mergedResponse.type,
+                                name = mergedResponse.name,
+                                poster = mergedPoster,
+                                plot = mergedPlot,
+                                score = mergedResponse.score?.toInt(),
+                                showStatus = if (mergedResponse is AnimeLoadResponse) mergedResponse.showStatus?.name else if (mergedResponse is TvSeriesLoadResponse) mergedResponse.showStatus?.name else null,
+                                year = mergedResponse.year,
+                                episodeCount = if (mergedResponse is AnimeLoadResponse) mergedResponse.episodes.values.flatten().size else if (mergedResponse is TvSeriesLoadResponse) mergedResponse.episodes.size else null,
+                                date = null,
+                                actors = mergedActors?.map { actorData ->
+                                    "${actorData.actor.name}|${actorData.actor.image}|${actorData.role?.name}|${actorData.roleString}|${actorData.voiceActor?.name}|${actorData.voiceActor?.image}"
+                                },
+                                id = id,
+                                cacheTime = System.currentTimeMillis(),
+                            )
+                        )
+                    }
+
+                    currentRepo?.let { repo ->
+                        postPage(mergedResponse, repo)
+                    }
+                } else {
+                    Log.w(TAG, "Failed to fetch metadata from $providerName")
+                }
+            }
+        }
+    }
+
     private suspend fun applyMeta(
         resp: LoadResponse,
         meta: SyncAPI.SyncResult?,
@@ -1645,7 +2183,7 @@ class ResultViewModel2 : ViewModel() {
         //if (meta == null) return resp to false
         var updateEpisodes = false
         val out = resp.apply {
-            Log.i(TAG, "applyMeta")
+            Log.i(TAG, "applyMeta - meta: ${meta != null}, meta.airStatus: ${meta?.airStatus}, meta.synopsis: ${meta?.synopsis?.take(50)}, meta.actors: ${meta?.actors?.size}")
 
             if (meta != null) {
                 duration = duration ?: meta.duration
@@ -1657,6 +2195,12 @@ class ResultViewModel2 : ViewModel() {
 
                 if (this is EpisodeResponse) {
                     nextAiring = nextAiring ?: meta.nextAiring
+                }
+
+                if (this is AnimeLoadResponse) {
+                    showStatus = showStatus ?: meta.airStatus
+                } else if (this is TvSeriesLoadResponse) {
+                    showStatus = showStatus ?: meta.airStatus
                 }
 
                 val realRecommendations = ArrayList<SearchResponse>()
@@ -1802,6 +2346,46 @@ class ResultViewModel2 : ViewModel() {
                 updateEpisodes ?: return@launchSafe,
                 false
             )
+            
+            // Update cache with AniList sync metadata if actors are present
+            val metaActors = meta?.actors
+            val id = currentId
+            if (metaActors != null && metaActors.isNotEmpty() && id != null) {
+                val existingCachedHeader = getKey<DownloadObjects.DownloadHeaderCached>(
+                    DOWNLOAD_HEADER_CACHE,
+                    id.toString()
+                )
+                val hasNewActors = existingCachedHeader?.actors == null || existingCachedHeader.actors.isNullOrEmpty()
+                
+                if (hasNewActors) {
+                    Log.i(TAG, "Updating cache with AniList sync metadata - actors: ${metaActors.size}")
+                    value?.let { response ->
+                        val responseActors = response.actors
+                        setKey(
+                            DOWNLOAD_HEADER_CACHE,
+                            id.toString(),
+                            DownloadObjects.DownloadHeaderCached(
+                                apiName = response.apiName,
+                                url = response.url,
+                                type = response.type,
+                                name = response.name,
+                                poster = response.posterUrl,
+                                plot = response.plot,
+                                score = response.score?.toInt(),
+                                showStatus = if (response is AnimeLoadResponse) response.showStatus?.name else if (response is TvSeriesLoadResponse) response.showStatus?.name else null,
+                                year = response.year,
+                                episodeCount = if (response is AnimeLoadResponse) response.episodes.values.flatten().size else if (response is TvSeriesLoadResponse) response.episodes.size else null,
+                                date = null,
+                                actors = responseActors?.map { actorData ->
+                                    "${actorData.actor.name}|${actorData.actor.image}|${actorData.role?.name}|${actorData.roleString}|${actorData.voiceActor?.name}|${actorData.voiceActor?.image}"
+                                },
+                                id = id,
+                                cacheTime = System.currentTimeMillis(),
+                            )
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -2198,6 +2782,24 @@ class ResultViewModel2 : ViewModel() {
                                     seasonData = seasonData,
                                 )
 
+                            // Cache episode with metadata
+                            CloudStreamApp.setKey(
+                                DOWNLOAD_EPISODE_CACHE,
+                                id.toString(),
+                                DownloadObjects.DownloadEpisodeCached(
+                                    name = i.name,
+                                    poster = i.posterUrl,
+                                    episode = episode,
+                                    season = i.season,
+                                    id = id,
+                                    parentId = mainId,
+                                    score = i.score,
+                                    description = i.description,
+                                    date = i.date,
+                                    cacheTime = System.currentTimeMillis()
+                                )
+                            )
+
                             val season = eps.seasonIndex ?: 0
                             val indexer = EpisodeIndexer(ep.key, season)
                             episodes[indexer]?.add(eps) ?: run {
@@ -2254,6 +2856,24 @@ class ResultViewModel2 : ViewModel() {
                                 runTime = episode.runTime,
                                 seasonData = seasonData,
                             )
+
+                        // Cache episode with metadata
+                        CloudStreamApp.setKey(
+                            DOWNLOAD_EPISODE_CACHE,
+                            id.toString(),
+                            DownloadObjects.DownloadEpisodeCached(
+                                name = episode.name,
+                                poster = episode.posterUrl,
+                                episode = episodeIndex,
+                                season = episode.season,
+                                id = id,
+                                parentId = mainId,
+                                score = episode.score,
+                                description = episode.description,
+                                date = episode.date,
+                                cacheTime = System.currentTimeMillis()
+                            )
+                        )
 
                         val season = ep.seasonIndex ?: 0
                         val indexer = EpisodeIndexer(DubStatus.None, season)
@@ -2398,13 +3018,7 @@ class ResultViewModel2 : ViewModel() {
             ResumeProgress(
                 progress = (viewPos.position / 1000).toInt(),
                 maxProgress = (viewPos.duration / 1000).toInt(),
-                txt(
-                    R.string.resume_remaining,
-                    secondsToReadable(
-                        ((viewPos.duration - viewPos.position) / 1_000).toInt(),
-                        "0 mins"
-                    )
-                )
+                progressLeft = txt(R.string.action_continue)
             )
         }
 
@@ -2463,17 +3077,173 @@ class ResultViewModel2 : ViewModel() {
 
                 returnlist.size < limit
             }
-            return@coroutineScope returnlist
+            returnlist
         }
 
-
     // this instantly updates the metadata on the page
-    private fun postPage(loadResponse: LoadResponse, apiRepository: APIRepository) {
+    fun postPage(loadResponse: LoadResponse, apiRepository: APIRepository) {
+        android.util.Log.d("MetadataSwap", "postPage called with: ${loadResponse.name}, actors: ${(loadResponse as? AnimeLoadResponse)?.actors?.size ?: (loadResponse as? TvSeriesLoadResponse)?.actors?.size}, plot: ${(loadResponse as? AnimeLoadResponse)?.plot?.take(30) ?: (loadResponse as? TvSeriesLoadResponse)?.plot?.take(30)}")
         _recommendations.postValue(loadResponse.recommendations ?: emptyList())
+        // Force UI refresh by posting null first, then the new value
+        _page.postValue(null)
         _page.postValue(Resource.Success(loadResponse.toResultData(apiRepository)))
     }
 
-    fun hasLoaded() = currentResponse != null
+    @Suppress("DEPRECATION")
+    private fun createOfflineLoadResponse(
+        cachedHeader: DownloadObjects.DownloadHeaderCached,
+        url: String,
+        apiName: String
+    ): LoadResponse {
+        // Parse cached actor data back to ActorData objects
+        val actors = cachedHeader.actors?.map { actorDataString ->
+            val parts = actorDataString.split("|")
+            if (parts.size >= 5) {
+                ActorData(
+                    actor = Actor(name = parts[0], image = if (parts[1].isNotEmpty()) parts[1] else "android.resource://com.lagradost.cloudstream3/drawable/example_poster"),
+                    role = if (parts[2].isNotEmpty()) try { ActorRole.valueOf(parts[2]) } catch (e: Exception) { null } else null,
+                    roleString = if (parts[3].isNotEmpty()) parts[3] else null,
+                    voiceActor = if (parts[4].isNotEmpty()) Actor(name = parts[4], image = if (parts.size > 5 && parts[5].isNotEmpty()) parts[5] else null) else null
+                )
+            } else {
+                // Fallback for old cached data or malformed data
+                ActorData(
+                    actor = Actor(name = actorDataString, image = "android.resource://com.lagradost.cloudstream3/drawable/example_poster"),
+                    role = null,
+                    roleString = null,
+                    voiceActor = null
+                )
+            }
+        }
+
+        // Use LoadResponseFromSearch to avoid deprecated constructors
+        return LoadResponseFromSearch(
+            name = cachedHeader.name,
+            url = url,
+            apiName = apiName,
+            type = cachedHeader.type,
+            posterUrl = cachedHeader.poster,
+            year = cachedHeader.year,
+            plot = cachedHeader.plot,
+            score = cachedHeader.score?.let { if (it >= 0 && it <= 10) Score.from10(it) else null },
+            tags = null,
+            duration = null,
+            trailers = mutableListOf(),
+            recommendations = null,
+            actors = actors,
+            comingSoon = false,
+            syncData = mutableMapOf(),
+            posterHeaders = null,
+            backgroundPosterUrl = null,
+            logoUrl = null,
+            contentRating = null,
+            uniqueUrl = url,
+            id = cachedHeader.id,
+            showStatus = cachedHeader.showStatus?.let { try { ShowStatus.valueOf(it) } catch (e: Exception) { null } }
+        )
+    }
+
+    private fun loadOfflineEpisodes(parentId: Int, cachedHeader: DownloadObjects.DownloadHeaderCached, apiName: String) {
+        ioSafe {
+            val cachedEpisodes = getKeys(DOWNLOAD_EPISODE_CACHE)
+                ?.mapNotNull { getKey<DownloadObjects.DownloadEpisodeCached>(it) }
+                ?.filter { it.parentId == parentId }
+                ?.sortedWith(compareBy<DownloadObjects.DownloadEpisodeCached> { it.season ?: 0 }
+                    .thenBy { it.episode })
+            
+            if (cachedEpisodes.isNullOrEmpty()) {
+                android.util.Log.d("LocalLibraryTest", "No cached episodes found for parentId: $parentId")
+                return@ioSafe
+            }
+
+            android.util.Log.d("LocalLibraryTest", "Loaded ${cachedEpisodes.size} cached episodes for offline mode")
+            android.util.Log.d("LocalLibraryTest", "Cached header - score: ${cachedHeader.score}, showStatus: ${cachedHeader.showStatus}, year: ${cachedHeader.year}, episodeCount: ${cachedHeader.episodeCount}, actors: ${cachedHeader.actors}")
+            cachedEpisodes.forEach {
+                android.util.Log.d("LocalLibraryTest", "Cached episode - id: ${it.id}, name: ${it.name}, date: ${it.date}, score: ${it.score}")
+            }
+
+            // Convert cached episodes to ResultEpisode format
+            val resultEpisodes = cachedEpisodes.mapIndexed { index, cached ->
+                val posDur = getViewPos(cached.id)
+                ResultEpisode(
+                    headerName = cachedHeader.name ?: "",
+                    name = cached.name ?: "Episode ${cached.episode}",
+                    poster = cached.poster,
+                    episode = cached.episode,
+                    seasonIndex = cached.season?.let { it - 1 },
+                    season = cached.season,
+                    data = "",
+                    apiName = apiName,
+                    id = cached.id,
+                    index = index,
+                    position = posDur?.position ?: 0,
+                    duration = posDur?.duration ?: 0,
+                    score = cached.score,
+                    description = cached.description,
+                    isFiller = null,
+                    tvType = cachedHeader.type ?: TvType.Anime,
+                    parentId = parentId,
+                    videoWatchState = getVideoWatchState(cached.id) ?: VideoWatchState.None,
+                    totalEpisodeIndex = cached.episode,
+                    airDate = cached.date
+                )
+            }
+            
+            // Group episodes by season and create new map
+            val episodesBySeason = resultEpisodes.groupBy { it.season ?: 0 }
+            val newEpisodes = mutableMapOf<EpisodeIndexer, List<ResultEpisode>>()
+            episodesBySeason.forEach { (season, episodes) ->
+                newEpisodes[EpisodeIndexer(dubStatus = preferDubStatus ?: DubStatus.Subbed, season = season)] = 
+                    episodes.sortedBy { it.episode }
+            }
+            currentEpisodes = newEpisodes
+            
+            // Set up episode sorting for local library
+            val sortOptions = mutableListOf<Pair<UiText, EpisodeSortType>>().apply {
+                // Episode number sorting is always available
+                add(txt(R.string.sort_episodes_number_asc) to EpisodeSortType.NUMBER_ASC)
+                add(txt(R.string.sort_episodes_number_desc) to EpisodeSortType.NUMBER_DESC)
+
+                // Only add rating options if any episodes have ratings
+                if (shouldEnableSort(EpisodeSortType.RATING_HIGH_LOW, resultEpisodes)) {
+                    add(txt(R.string.sort_episodes_rating_high_low) to EpisodeSortType.RATING_HIGH_LOW)
+                    add(txt(R.string.sort_episodes_rating_low_high) to EpisodeSortType.RATING_LOW_HIGH)
+                }
+
+                // Only add air date options if any episodes have air dates
+                if (shouldEnableSort(EpisodeSortType.DATE_NEWEST, resultEpisodes)) {
+                    add(txt(R.string.sort_episodes_date_newest) to EpisodeSortType.DATE_NEWEST)
+                    add(txt(R.string.sort_episodes_date_oldest) to EpisodeSortType.DATE_OLDEST)
+                }
+            }
+
+            _sortSelections.postValue(sortOptions)
+            
+            // Set default sorting to NUMBER_ASC for local library
+            val defaultSorting = EpisodeSortType.NUMBER_ASC
+            _selectedSorting.postValue(txt(R.string.sort_button_episode, ""))
+            _selectedSortingIndex.postValue(0)
+            
+            // Set up ranges like postEpisodes does
+            val ranges = getRanges(newEpisodes, EPISODE_RANGE_SIZE)
+            currentRanges = ranges
+            
+            // Set up range and post episodes
+            val min = ranges.keys.minByOrNull { index ->
+                kotlin.math.abs(
+                    index.season - (preferStartSeason ?: 1)
+                ) + if (index.dubStatus == preferDubStatus) 0 else 100000
+            }
+            
+            val ranger = ranges[min]
+            val range = ranger?.firstOrNull {
+                it.startEpisode >= (preferStartEpisode ?: 0)
+            } ?: ranger?.lastOrNull()
+            
+            postEpisodeRange(min, range, defaultSorting)
+            postResume()
+        }
+    }
 
     private fun handleAutoStart(activity: Activity?, autostart: AutoResume?) =
         viewModelScope.launchSafe {
@@ -2536,6 +3306,7 @@ class ResultViewModel2 : ViewModel() {
         override var contentRating: String? = null,
         override var uniqueUrl: String = url,
         val id: Int?,
+        var showStatus: ShowStatus? = null, // Added for offline status display
     ) : LoadResponse
 
     fun loadSmall(searchResponse: SearchResponse) = ioSafe {
@@ -2628,7 +3399,37 @@ class ResultViewModel2 : ViewModel() {
 
             when (val data = repo.load(validUrl)) {
                 is Resource.Failure -> {
-                    _page.postValue(data)
+                    // OFFLINE FALLBACK: Try to use cached header data if available
+                    // First try exact URL match, then try ID match to avoid wrong cached entry
+                    val allCachedHeaders = getKeys(DOWNLOAD_HEADER_CACHE)
+                        ?.mapNotNull { getKey<DownloadObjects.DownloadHeaderCached>(it) }
+                    
+                    android.util.Log.d("LocalLibraryTest", "API failed for url: $url, searching among ${allCachedHeaders?.size} cached headers")
+                    allCachedHeaders?.forEach { android.util.Log.d("LocalLibraryTest", "  Cached: ${it.name} (url: ${it.url}, id: ${it.id})") }
+                    
+                    val cachedHeader = allCachedHeaders
+                        ?.find { it.url == url }
+                        ?: allCachedHeaders
+                            ?.find { it.id.toString() == url }
+                    
+                    android.util.Log.d("LocalLibraryTest", "Matched cached header: ${cachedHeader?.name} (url: ${cachedHeader?.url}, id: ${cachedHeader?.id})")
+                    
+                    if (cachedHeader != null) {
+                        android.util.Log.d("LocalLibraryTest", "API failed, using cached header for: ${cachedHeader.name} (url: $url)")
+                        // Create a minimal LoadResponse from cached data for local playback
+                        val offlineResponse = createOfflineLoadResponse(cachedHeader, url, apiName)
+                        postSuccessful(
+                            offlineResponse,
+                            cachedHeader.id,
+                            updateEpisodes = true,
+                            updateFillers = false,
+                            apiRepository = repo
+                        )
+                        // Load episodes from cache
+                        loadOfflineEpisodes(cachedHeader.id, cachedHeader, apiName)
+                    } else {
+                        _page.postValue(data)
+                    }
                 }
 
                 is Resource.Success -> {
@@ -2643,23 +3444,116 @@ class ResultViewModel2 : ViewModel() {
                     preferStartEpisode = getResultEpisode(mainId)
                     preferStartSeason = getResultSeason(mainId) ?: 1
 
-                    setKey(
+                    // Automatic metadata fetching from TMDB
+                    val autoMetadataEnabled = context?.let { ctx ->
+                        androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+                            .getBoolean(ctx.getString(R.string.auto_metadata_fetch_key), true)
+                    } ?: true
+
+                    val response = if (autoMetadataEnabled) {
+                        // Check if metadata is missing
+                        val needsMetadata = loadResponse.plot.isNullOrBlank() ||
+                                loadResponse.actors.isNullOrEmpty() ||
+                                loadResponse.score == null ||
+                                (loadResponse is AnimeLoadResponse && loadResponse.showStatus == null) ||
+                                (loadResponse is TvSeriesLoadResponse && loadResponse.showStatus == null)
+
+                        if (needsMetadata) {
+                            Log.i(TAG, "Fetching metadata from AniList for: ${loadResponse.name}")
+                            val anilistMetadata = try {
+                                ioWork {
+                                    fetchMetadataFromProvider("AniList", loadResponse.name, null, loadResponse.type)
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Exception fetching AniList metadata: ${e.message}", e)
+                                null
+                            }
+                            if (anilistMetadata != null) {
+                                Log.i(TAG, "Successfully fetched metadata from AniList - actors: ${anilistMetadata.actors?.size}, plot: ${anilistMetadata.plot?.take(30)}, score: ${anilistMetadata.score}")
+                                val mergedResponse = mergeMetadataFromLoadResponse(loadResponse, anilistMetadata)
+                                Log.i(TAG, "After merge - actors: ${mergedResponse.actors?.size}, plot: ${mergedResponse.plot?.take(30)}, score: ${mergedResponse.score}")
+                                mergedResponse
+                            } else {
+                                Log.w(TAG, "Failed to fetch metadata from AniList - returned null")
+                                loadResponse
+                            }
+                        } else {
+                            Log.i(TAG, "No metadata needed - actors: ${loadResponse.actors?.size}, plot: ${loadResponse.plot?.take(30)}")
+                            loadResponse
+                        }
+                    } else {
+                        loadResponse
+                    }
+                    val cachedScore = loadResponse.score?.toInt()
+                    android.util.Log.d("AnimePaheDebug", "API Response after applyMeta - name: ${loadResponse.name}, actors: ${loadResponse.actors}, actors.size: ${loadResponse.actors?.size}, score: ${loadResponse.score}, plot: ${loadResponse.plot?.take(50)}")
+
+                    // Check for swapped metadata in cache and merge it into provider response
+                    // This ensures swapped metadata (plot, status, cast) persists across reloads
+                    val swappedCache = getKey<DownloadObjects.DownloadHeaderCached>(DOWNLOAD_HEADER_CACHE, validUrl)
+                    val finalResponse = if (swappedCache?.hasCustomPoster == true) {
+                        android.util.Log.d("MetadataSwap", "Found swapped metadata in cache for url: $validUrl, merging into provider response")
+                        // Create LoadResponse from swapped cache to merge with provider response
+                        val swappedResponse = createOfflineLoadResponse(swappedCache, validUrl, apiName)
+                        // Merge swapped metadata into provider response
+                        mergeMetadataFromLoadResponse(response, swappedResponse)
+                    } else {
+                        response
+                    }
+
+                    // Check if complete cached entry already exists
+                    val existingCachedHeader = getKey<DownloadObjects.DownloadHeaderCached>(
                         DOWNLOAD_HEADER_CACHE,
-                        mainId.toString(),
-                        DownloadObjects.DownloadHeaderCached(
-                            apiName = apiName,
-                            url = validUrl,
-                            type = loadResponse.type,
-                            name = loadResponse.name,
-                            poster = loadResponse.posterUrl,
-                            id = mainId,
-                            cacheTime = System.currentTimeMillis(),
-                        )
+                        mainId.toString()
                     )
+
+                    // Cache if no existing cache, or if cache is older than 1 hour, or if cache is missing critical data
+                    // Also force cache if we just fetched metadata (AniList or TMDB)
+                    val hasNewActors = loadResponse.actors != null && !loadResponse.actors.isNullOrEmpty() &&
+                        (existingCachedHeader?.actors == null || existingCachedHeader.actors.isNullOrEmpty())
+                    val hasNewPlot = loadResponse.plot != null && !loadResponse.plot.isNullOrBlank() &&
+                        (existingCachedHeader?.plot == null || existingCachedHeader.plot.isNullOrBlank())
+                    val hasNewScore = loadResponse.score != null && existingCachedHeader?.score == null
+                    val hasNewStatus = (loadResponse is AnimeLoadResponse && loadResponse.showStatus != null && existingCachedHeader?.showStatus == null) ||
+                        (loadResponse is TvSeriesLoadResponse && loadResponse.showStatus != null && existingCachedHeader?.showStatus == null)
+                    
+                    val shouldCache = existingCachedHeader == null ||
+                        (existingCachedHeader.cacheTime < System.currentTimeMillis() - 3600000) ||
+                        hasNewActors ||
+                        hasNewPlot ||
+                        hasNewScore ||
+                        hasNewStatus
+                    
+                    android.util.Log.d("LocalLibraryTest", "Cache check - existing: ${existingCachedHeader != null}, hasNewActors: $hasNewActors, hasNewPlot: $hasNewPlot, hasNewScore: $hasNewScore, hasNewStatus: $hasNewStatus, shouldCache: $shouldCache")
+                    android.util.Log.d("LocalLibraryTest", "LoadResponse actors: ${loadResponse.actors?.size}, plot: ${loadResponse.plot?.take(30)}, score: ${loadResponse.score}")
+                    
+                    if (shouldCache) {
+                        setKey(
+                            DOWNLOAD_HEADER_CACHE,
+                            mainId.toString(),
+                            DownloadObjects.DownloadHeaderCached(
+                                apiName = apiName,
+                                url = validUrl,
+                                type = loadResponse.type,
+                                name = loadResponse.name,
+                                poster = loadResponse.posterUrl,
+                                plot = loadResponse.plot,
+                                score = cachedScore,
+                                showStatus = if (loadResponse is AnimeLoadResponse) loadResponse.showStatus?.name else if (loadResponse is TvSeriesLoadResponse) loadResponse.showStatus?.name else if (loadResponse is LoadResponseFromSearch) loadResponse.showStatus?.name else null,
+                                year = loadResponse.year,
+                                episodeCount = if (loadResponse is AnimeLoadResponse) loadResponse.episodes.values.flatten().size else if (loadResponse is TvSeriesLoadResponse) loadResponse.episodes.size else null,
+                                date = null,
+                                actors = loadResponse.actors?.map { actorData ->
+                                    "${actorData.actor.name}|${actorData.actor.image}|${actorData.role?.name}|${actorData.roleString}|${actorData.voiceActor?.name}|${actorData.voiceActor?.image}"
+                                },
+                                id = mainId,
+                                cacheTime = System.currentTimeMillis(),
+                            )
+                        )
+                    }
                     if (loadTrailers)
-                        loadTrailers(data.value)
+                        loadTrailers(finalResponse)
                     postSuccessful(
-                        data.value,
+                        finalResponse,
                         mainId,
                         updateEpisodes = true,
                         updateFillers = showFillers,
@@ -2674,4 +3568,4 @@ class ResultViewModel2 : ViewModel() {
                 }
             }
         }
-}
+    }

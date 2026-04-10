@@ -167,6 +167,7 @@ class EpisodeAdapter(
                             parentId = item.parentId,
                             score = item.score,
                             description = item.description,
+                            date = item.airDate,
                             cacheTime = System.currentTimeMillis(),
                         ), null
                     ) {
@@ -198,6 +199,12 @@ class EpisodeAdapter(
                     }
 
                     val status = VideoDownloadManager.downloadStatus[item.id]
+                        ?: VideoDownloadManager.getDownloadFileInfo(downloadButton.context, item.id)?.let {
+                            VideoDownloadManager.DownloadType.IsDone
+                        }
+                        ?: VideoDownloadManager.getDownloadFileInfo(downloadButton.context, item.id)?.let {
+                            VideoDownloadManager.DownloadType.IsDone
+                        }
                     downloadButton.resetView()
                     downloadButton.setPersistentId(item.id)
                     downloadButton.setStatus(status)
@@ -388,6 +395,7 @@ class EpisodeAdapter(
                             parentId = item.parentId,
                             score = item.score,
                             description = item.description,
+                            date = item.airDate,
                             cacheTime = System.currentTimeMillis(),
                         ), null
                     ) {

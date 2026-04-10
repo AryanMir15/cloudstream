@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="?attr/primaryGrayBackground">
+
+    <!-- Top bar with close button -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="16dp">
+
+        <ImageButton
+            android:id="@+id/close_btt"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:layout_gravity="end"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:src="@drawable/ic_baseline_close_24"
+            android:contentDescription="Close"
+            android:tint="?attr/textColor" />
+    </FrameLayout>
+
+    <!-- Poster card in center -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:gravity="center">
+
+        <include
+            android:id="@+id/poster_card"
+            layout="@layout/home_result_grid_expanded"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center" />
+    </FrameLayout>
+
+    <!-- Buttons at bottom -->
+    <LinearLayout
+        android:id="@+id/button_holder"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="end"
+        android:orientation="horizontal"
+        android:padding="16dp">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/edit_search_btt"
+            android:layout_width="wrap_content"
+            android:layout_marginEnd="8dp"
+            android:text="Edit Search"
+            style="@style/BlackButton" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/swap_btt"
+            android:layout_width="wrap_content"
+            android:text="Swap Metadata"
+            style="@style/WhiteButton" />
+    </LinearLayout>
+</LinearLayout>

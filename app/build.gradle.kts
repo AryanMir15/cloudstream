@@ -9,6 +9,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.dokka)
     alias(libs.plugins.kotlin.android)
+    id("kotlin-kapt")
 }
 
 val javaTarget = JvmTarget.fromTarget(libs.versions.jvmTarget.get())
@@ -16,21 +17,15 @@ val javaTarget = JvmTarget.fromTarget(libs.versions.jvmTarget.get())
 fun getGitCommitHash(): String {
     return try {
         val headFile = file("${project.rootDir}/.git/HEAD")
-
-        // Read the commit hash from .git/HEAD
         if (headFile.exists()) {
             val headContent = headFile.readText().trim()
             if (headContent.startsWith("ref:")) {
-                val refPath = headContent.substring(5) // e.g., refs/heads/main
+                val refPath = headContent.substring(5)
                 val commitFile = file("${project.rootDir}/.git/$refPath")
                 if (commitFile.exists()) commitFile.readText().trim() else ""
-            } else headContent // If it's a detached HEAD (commit hash directly)
-        } else {
-            "" // If .git/HEAD doesn't exist
-        }.take(7) // Return the short commit hash
-    } catch (_: Throwable) {
-        "" // Just return an empty string if any exception occurs
-    }
+            } else headContent
+        } else ""
+    } catch (_: Throwable) { "" }.take(7)
 }
 
 android {
@@ -47,26 +42,7 @@ android {
         includeInBundle = false
     }
 
-    viewBinding {
-        enable = true
-    }
-
-    signingConfigs {
-        // We just use SIGNING_KEY_ALIAS here since it won't change
-        // so won't kill the configuration cache.
-        if (System.getenv("SIGNING_KEY_ALIAS") != null) {
-            create("prerelease") {
-                val tmpFilePath = System.getProperty("user.home") + "/work/_temp/keystore/"
-                val prereleaseStoreFile: File? = File(tmpFilePath).listFiles()?.first()
-
-                storeFile = prereleaseStoreFile?.let { file(it) }
-                storePassword = System.getenv("SIGNING_STORE_PASSWORD")
-                keyAlias = System.getenv("SIGNING_KEY_ALIAS")
-                keyPassword = System.getenv("SIGNING_KEY_PASSWORD")
-            }
-        }
-    }
-
+    namespace = "com.lagradost.cloudstream3"
     compileSdk = libs.versions.compileSdk.get().toInt()
 
     defaultConfig {
@@ -77,47 +53,26 @@ android {
         versionName = "4.7.0"
 
         resValue("string", "commit_hash", getGitCommitHash())
-
         manifestPlaceholders["target_sdk_version"] = libs.versions.targetSdk.get()
 
-        // Reads local.properties
         val localProperties = gradleLocalProperties(rootDir, project.providers)
+        buildConfigField("long", "BUILD_DATE", "${System.currentTimeMillis()}L")
+        buildConfigField("String", "SIMKL_CLIENT_ID", "\"${System.getenv("SIMKL_CLIENT_ID") ?: localProperties["simkl.id"] ?: ""}\"")
+        buildConfigField("String", "SIMKL_CLIENT_SECRET", "\"${System.getenv("SIMKL_CLIENT_SECRET") ?: localProperties["simkl.secret"] ?: ""}\"")
 
-        buildConfigField(
-            "long",
-            "BUILD_DATE",
-            "${System.currentTimeMillis()}"
-        )
-        buildConfigField(
-            "String",
-            "SIMKL_CLIENT_ID",
-            "\"" + (System.getenv("SIMKL_CLIENT_ID") ?: localProperties["simkl.id"]) + "\""
-        )
-        buildConfigField(
-            "String",
-            "SIMKL_CLIENT_SECRET",
-            "\"" + (System.getenv("SIMKL_CLIENT_SECRET") ?: localProperties["simkl.secret"]) + "\""
-        )
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
         release {
-            isDebuggable = false
             isMinifyEnabled = false
             isShrinkResources = false
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         debug {
             isDebuggable = true
             applicationIdSuffix = ".debug"
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
 
@@ -129,11 +84,6 @@ android {
         create("prerelease") {
             dimension = "state"
             applicationIdSuffix = ".prerelease"
-            if (signingConfigs.names.contains("prerelease")) {
-                signingConfig = signingConfigs.getByName("prerelease")
-            } else {
-                logger.warn("No prerelease signing config!")
-            }
             versionNameSuffix = "-PRE"
             versionCode = (System.currentTimeMillis() / 60000).toInt()
         }
@@ -141,16 +91,8 @@ android {
 
     compileOptions {
         isCoreLibraryDesugaringEnabled = true
-        sourceCompatibility = JavaVersion.toVersion(javaTarget.target)
-        targetCompatibility = JavaVersion.toVersion(javaTarget.target)
-    }
-
-    java {
-	    // Use Java 17 toolchain even if a higher JDK runs the build.
-        // We still use Java 8 for now which higher JDKs have deprecated.
-	    toolchain {
-		    languageVersion.set(JavaLanguageVersion.of(libs.versions.jdkToolchain.get()))
-    	}
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
     }
 
     lint {
@@ -158,9 +100,22 @@ android {
         checkReleaseBuilds = false
     }
 
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(JvmTarget.JVM_17)
+            jvmDefault.set(JvmDefaultMode.ENABLE)
+            freeCompilerArgs.add("-Xannotation-default-target=param-property")
+            optIn.addAll(
+                "com.lagradost.cloudstream3.InternalAPI",
+                "com.lagradost.cloudstream3.Prerelease",
+            )
+        }
+    }
+
     buildFeatures {
         buildConfig = true
         resValues = true
+        viewBinding = true
     }
 
     packaging {
@@ -171,7 +126,12 @@ android {
         }
     }
 
-    namespace = "com.lagradost.cloudstream3"
+    java {
+        // Use Java 17 toolchain even if a higher JDK runs the build.
+        toolchain {
+            languageVersion.set(JavaLanguageVersion.of(libs.versions.jdkToolchain.get()))
+        }
+    }
 }
 
 dependencies {
@@ -183,7 +143,7 @@ dependencies {
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)
 
-    // Android Core & Lifecycle
+    // Android Core
     implementation(libs.core.ktx)
     implementation(libs.activity.ktx)
     implementation(libs.appcompat)
@@ -191,51 +151,42 @@ dependencies {
     implementation(libs.bundles.lifecycle)
     implementation(libs.bundles.navigation)
 
-    // Design & UI
+    // Room Database (FIXES UNRESOLVED DAO/ENTITY)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    kapt(libs.androidx.room.compiler)
+
+    // UI & Media
     implementation(libs.preference.ktx)
     implementation(libs.material)
     implementation(libs.constraintlayout)
-
-    // Coil Image Loading
     implementation(libs.bundles.coil)
-
-    // Media 3 (ExoPlayer)
     implementation(libs.bundles.media3)
     implementation(libs.video)
-
-    // FFmpeg Decoding
     implementation(libs.bundles.nextlib)
 
-    // PlayBack
-    implementation(libs.colorpicker) // Subtitle Color Picker
-    implementation(libs.newpipeextractor) // For Trailers
-    implementation(libs.juniversalchardet) // Subtitle Decoding
-
-    // UI Stuff
-    implementation(libs.shimmer) // Shimmering Effect (Loading Skeleton)
-    implementation(libs.palette.ktx) // Palette for Images -> Colors
+    // Libs
+    implementation(libs.colorpicker)
+    implementation(libs.newpipeextractor)
+    implementation(libs.juniversalchardet)
+    implementation(libs.shimmer)
+    implementation(libs.palette.ktx)
     implementation(libs.tvprovider)
-    implementation(libs.overlappingpanels) // Gestures
-    implementation(libs.biometric) // Fingerprint Authentication
-    implementation(libs.previewseekbar.media3) // SeekBar Preview
-    implementation(libs.qrcode.kotlin) // QR Code for PIN Auth on TV
-
-    // Extensions & Other Libs
-    implementation(libs.jsoup) // HTML Parser
-    implementation(libs.rhino) // Run JavaScript
-    implementation(libs.fuzzywuzzy) // Library/Ext Searching with Levenshtein Distance
-    implementation(libs.safefile) // To Prevent the URI File Fu*kery
-    coreLibraryDesugaring(libs.desugar.jdk.libs.nio) // NIO Flavor Needed for NewPipeExtractor
-    implementation(libs.conscrypt.android) // To Fix SSL Fu*kery on Android 9
-    implementation(libs.jackson.module.kotlin) // JSON Parser
+    implementation(libs.overlappingpanels)
+    implementation(libs.biometric)
+    implementation(libs.previewseekbar.media3)
+    implementation(libs.qrcode.kotlin)
+    implementation(libs.jsoup)
+    implementation(libs.rhino)
+    implementation(libs.fuzzywuzzy)
+    implementation(libs.safefile)
+    coreLibraryDesugaring(libs.desugar.jdk.libs.nio)
+    implementation(libs.conscrypt.android)
+    implementation(libs.jackson.module.kotlin)
     implementation(libs.zipline)
-
-    // Torrent Support
     implementation(libs.torrentserver)
-
-    // Downloading & Networking
     implementation(libs.work.runtime.ktx)
-    implementation(libs.nicehttp) // HTTP Lib
+    implementation(libs.nicehttp)
 
     implementation(project(":library"))
 }
@@ -272,31 +223,12 @@ tasks.register<Jar>("makeJar") {
 
 tasks.withType<KotlinJvmCompile> {
     compilerOptions {
-        jvmTarget.set(javaTarget)
+        jvmTarget.set(JvmTarget.JVM_17)
         jvmDefault.set(JvmDefaultMode.ENABLE)
         freeCompilerArgs.add("-Xannotation-default-target=param-property")
         optIn.addAll(
             "com.lagradost.cloudstream3.InternalAPI",
             "com.lagradost.cloudstream3.Prerelease",
         )
-    }
-}
-
-dokka {
-    moduleName = "App"
-    dokkaSourceSets {
-        main {
-            analysisPlatform = KotlinPlatform.JVM
-            documentedVisibilities(
-                VisibilityModifier.Public,
-                VisibilityModifier.Protected
-            )
-
-            sourceLink {
-                localDirectory = file("..")
-                remoteUrl("https://github.com/recloudstream/cloudstream/tree/master")
-                remoteLineSuffix = "#L"
-            }
-        }
     }
 }

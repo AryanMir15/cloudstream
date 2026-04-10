@@ -67,6 +67,7 @@
     <string name="poster_ui_key">poster_ui_key</string>
     <string name="overscan_key">overscan_key</string>
     <string name="poster_size_key">poster_size_key</string>
+    <string name="library_poster_size_key">library_poster_size_key</string>
     <string name="subtitles_encoding_key">subtitles_encoding_key</string>
     <string name="override_site_key">override_site_key</string>
     <string name="redo_setup_key">redo_setup_key</string>
@@ -100,6 +101,8 @@
     <string name="kitsu_key">kitsu_key</string>
     <string name="opensubtitles_key">opensubtitles_key</string>
     <string name="subdl_key">subdl_key</string>
+    <string name="auto_metadata_fetch_key">auto_metadata_fetch_key</string>
+    <string name="metadata_provider_key">metadata_provider_key</string>
 
     <string name="pref_category_security_key">pref_category_security_key</string>
     <string name="pref_category_gestures_key">pref_category_gestures_key</string>
