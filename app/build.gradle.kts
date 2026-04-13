@@ -46,7 +46,7 @@ android {
     compileSdk = libs.versions.compileSdk.get().toInt()
 
     defaultConfig {
-        applicationId = "com.lagradost.cloudstream3"
+        applicationId = "com.lagradost.cloudcache"
         minSdk = libs.versions.minSdk.get().toInt()
         targetSdk = libs.versions.targetSdk.get().toInt()
         versionCode = 68
@@ -56,7 +56,7 @@ android {
         manifestPlaceholders["target_sdk_version"] = libs.versions.targetSdk.get()
 
         val localProperties = gradleLocalProperties(rootDir, project.providers)
-        buildConfigField("long", "BUILD_DATE", "${System.currentTimeMillis()}L")
+        buildConfigField("long", "BUILD_DATE", "0L")
         buildConfigField("String", "SIMKL_CLIENT_ID", "\"${System.getenv("SIMKL_CLIENT_ID") ?: localProperties["simkl.id"] ?: ""}\"")
         buildConfigField("String", "SIMKL_CLIENT_SECRET", "\"${System.getenv("SIMKL_CLIENT_SECRET") ?: localProperties["simkl.secret"] ?: ""}\"")
 
@@ -65,13 +65,14 @@ android {
 
     buildTypes {
         release {
+            buildConfigField("long", "BUILD_DATE", "${System.currentTimeMillis()}L")
             isMinifyEnabled = false
             isShrinkResources = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         debug {
+            buildConfigField("long", "BUILD_DATE", "0L")
             isDebuggable = true
-            applicationIdSuffix = ".debug"
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -124,6 +125,16 @@ android {
             // Note: This may increase app startup time slightly.
             useLegacyPackaging = true
         }
+    }
+
+    applicationVariants.all {
+        val variant = this
+        variant.outputs
+            .map { it as com.android.build.gradle.internal.api.BaseVariantOutputImpl }
+            .forEach { output ->
+                val outputFileName = "CloudCache-${variant.versionName}-${variant.buildType.name}.apk"
+                output.outputFileName = outputFileName
+            }
     }
 
     java {

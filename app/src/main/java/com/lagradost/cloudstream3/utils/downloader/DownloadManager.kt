@@ -52,6 +52,7 @@ import com.lagradost.cloudstream3.utils.DOWNLOAD_EPISODE_CACHE
 import com.lagradost.cloudstream3.utils.DOWNLOAD_HEADER_CACHE
 import com.lagradost.cloudstream3.utils.DataStore.getFolderName
 import com.lagradost.cloudstream3.utils.DataStore.getKey
+import com.lagradost.cloudstream3.utils.DataStore.getKeys
 import com.lagradost.cloudstream3.utils.DataStore.removeKey
 import com.lagradost.cloudstream3.utils.Event
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -201,10 +202,47 @@ object VideoDownloadManager {
      * [KEY_RESUME_PACKAGES] can store keys which should not be automatically queued, unlike this key.
      */
     const val KEY_RESUME_IN_QUEUE = "download_resume_queue_key"
+    const val KEY_DOWNLOAD_STATUS = "download_status"
 //    private const val KEY_RESUME_QUEUE_PACKAGES = "download_q_resume"
 
     val downloadStatus = HashMap<Int, DownloadType>()
     val downloadStatusEvent = Event<Pair<Int, DownloadType>>()
+    
+    fun loadPersistedDownloadStatus(context: Context) {
+        android.util.Log.d("VideoDownloadManager", "loadPersistedDownloadStatus called")
+        try {
+            val allKeys = context.getKeys(KEY_DOWNLOAD_STATUS)
+            android.util.Log.d("VideoDownloadManager", "getKeys returned: $allKeys")
+            if (allKeys == null) {
+                android.util.Log.d("VideoDownloadManager", "No download status keys found")
+                return
+            }
+            android.util.Log.d("VideoDownloadManager", "Found ${allKeys.size} download status keys")
+            allKeys.forEach { key ->
+                // Key format is "download_status/{id}", extract the ID part
+                val idStr = key.substringAfterLast("/")
+                val id = idStr.toIntOrNull()
+                if (id == null) {
+                    android.util.Log.d("VideoDownloadManager", "Failed to parse ID from key: $key")
+                    return@forEach
+                }
+                val statusStr = context.getKey<String>(KEY_DOWNLOAD_STATUS, idStr)
+                if (statusStr == null) {
+                    android.util.Log.d("VideoDownloadManager", "No status string found for episode $id")
+                    return@forEach
+                }
+                val status = DownloadType.values().firstOrNull { it.name == statusStr }
+                if (status == null) {
+                    android.util.Log.d("VideoDownloadManager", "Invalid status string for episode $id: $statusStr")
+                    return@forEach
+                }
+                downloadStatus[id] = status
+                android.util.Log.d("VideoDownloadManager", "Loaded persisted download status for episode $id: $status")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("VideoDownloadManager", "Error loading persisted download status", e)
+        }
+    }
     val downloadDeleteEvent = Event<Int>()
     val downloadEvent = Event<Pair<Int, DownloadActionType>>()
     val downloadProgressEvent = Event<Triple<Int, Long, Long>>()
@@ -509,10 +547,24 @@ object VideoDownloadManager {
         tryResume: Boolean,
     ): StreamData {
         val displayName = getDisplayName(name, extension)
+        android.util.Log.d("DownloadTest", "setupStream - name: $name, folder: $folder, extension: $extension, displayName: $displayName, tryResume: $tryResume")
+        android.util.Log.d("DownloadTest", "setupStream - baseFile: ${baseFile.filePath()}")
 
         val subDir = baseFile.gotoDirectory(folder, createMissingDirectories = true)
             ?: throw IOException("Cant create directory")
-        val foundFile = subDir.findFile(displayName)
+        android.util.Log.d("DownloadTest", "setupStream - subDir created: ${subDir.filePath()}")
+        android.util.Log.d("DownloadTest", "setupStream - attempting to find file: $displayName")
+        
+        val foundFile = try {
+            subDir.findFile(displayName)
+        } catch (e: SecurityException) {
+            android.util.Log.d("DownloadTest", "setupStream - findFile threw SecurityException, treating as file not found: ${e.message}")
+            null
+        } catch (e: Exception) {
+            android.util.Log.d("DownloadTest", "setupStream - findFile threw generic exception, treating as file not found: ${e.message}")
+            null
+        }
+        android.util.Log.d("DownloadTest", "setupStream - foundFile: ${foundFile?.filePath()}")
 
         val (file, fileLength) = if (foundFile == null || foundFile.exists() != true) {
             subDir.createFileOrThrow(displayName) to 0L
@@ -1279,17 +1331,41 @@ object VideoDownloadManager {
             if (baseFile == null) return@withContext DOWNLOAD_BAD_CONFIG
 
             val displayName = getDisplayName(name, extension)
+            android.util.Log.d("DownloadTest", "downloadHLS - About to call setupStream")
             val stream =
                 setupStream(baseFile, name, folder, extension, startAt > 0)
+            android.util.Log.d("DownloadTest", "downloadHLS - setupStream returned successfully")
 
             if (!stream.resume) startAt = 0
-            fileStream = stream.open()
+            android.util.Log.d("DownloadTest", "downloadHLS - About to open stream")
+
+            // Retry stream opening to handle timing issues
+            val maxStreamRetries = 2
+            for (retry in 0 until maxStreamRetries) {
+                try {
+                    fileStream = stream.open()
+                    android.util.Log.d("DownloadTest", "downloadHLS - Stream opened successfully on attempt ${retry + 1}")
+                    break
+                } catch (e: Throwable) {
+                    android.util.Log.d("DownloadTest", "downloadHLS - Stream opening failed on attempt ${retry + 1}: ${e.message}")
+                    if (retry < maxStreamRetries - 1) {
+                        android.util.Log.d("DownloadTest", "downloadHLS - Retrying stream opening after delay...")
+                        delay(300)
+                    } else {
+                        throw e
+                    }
+                }
+            }
+
+            // fileStream is guaranteed to be non-null here (or exception was thrown above)
+            fileStream!!
 
             // push the metadata
             metadata.setResumeLength(stream.startAt)
             metadata.hlsProgress = startAt
             metadata.hlsWrittenProgress = startAt
             metadata.type = DownloadType.IsPending
+            android.util.Log.d("DownloadTest", "downloadHLS - Metadata set, about to fetch M3U8")
             metadata.setDownloadFileInfoTemplate(
                 DownloadedFileInfo(
                     totalBytes = 0,
@@ -1300,20 +1376,76 @@ object VideoDownloadManager {
             )
 
             // do the initial get request to fetch the segments
+            android.util.Log.d("DownloadTest", "downloadHLS - About to fetch M3U8 stream")
             val m3u8 = M3u8Helper.M3u8Stream(
                 link.url, link.quality, link.headers.appendAndDontOverride(
                     mapOf(
-                        "Accept-Encoding" to "identity",
                         "accept" to "*/*",
                         "user-agent" to USER_AGENT,
                     ) + if (link.referer.isNotBlank()) mapOf("referer" to link.referer) else emptyMap()
                 )
             )
+            android.util.Log.d("DownloadTest", "downloadHLS - M3U8 stream fetched, about to parse segments")
 
-            val items = M3u8Helper2.hslLazy(m3u8, selectBest = true, requireAudio = true)
+            android.util.Log.d("DownloadTest", "downloadHLS - About to parse segments")
 
+            // Retry M3U8 parsing locally to handle timing issues without triggering higher-level retry
+            val maxParseRetries = 3
+            var items: M3u8Helper2.LazyHlsDownloadData? = null
+            var parseException: Throwable? = null
+
+            for (retry in 0 until maxParseRetries) {
+                try {
+                    items = M3u8Helper2.hslLazy(m3u8, selectBest = true, requireAudio = true)
+                    android.util.Log.d("DownloadTest", "downloadHLS - Segments parsed successfully on attempt ${retry + 1}, total: ${items.size}")
+                    parseException = null
+                    break
+                } catch (e: Throwable) {
+                    android.util.Log.d("DownloadTest", "downloadHLS - M3U8 parsing failed on attempt ${retry + 1}: ${e.message}")
+                    parseException = e
+
+                    // Classify exception to determine if retry is worthwhile
+                    val isPermanentError = when (e) {
+                        is IllegalStateException -> {
+                            // Permanent parsing errors - no point retrying
+                            e.message?.contains("must contains TS files") == true ||
+                            e.message?.contains("empty") == true ||
+                            e.message?.contains("No TS") == true
+                        }
+                        else -> {
+                            // Other errors might be transient (network, timing)
+                            false
+                        }
+                    }
+
+                    if (isPermanentError) {
+                        android.util.Log.d("DownloadTest", "downloadHLS - Permanent parsing error detected, skipping retry to avoid wasting time")
+                        break
+                    }
+
+                    if (retry < maxParseRetries - 1) {
+                        android.util.Log.d("DownloadTest", "downloadHLS - Retrying M3U8 parsing after delay...")
+                        delay(500) // Wait 500ms before retry
+                    }
+                }
+            }
+
+            // If all retries failed, throw the last exception to trigger higher-level retry
+            if (items == null) {
+                android.util.Log.d("DownloadTest", "downloadHLS - M3U8 parsing failed after $maxParseRetries attempts")
+
+                // Add enhanced logging for diagnostics
+                android.util.Log.d("DownloadTest", "downloadHLS - M3U8 URL: ${m3u8.streamUrl}")
+                android.util.Log.d("DownloadTest", "downloadHLS - Exception: ${parseException?.javaClass?.simpleName}: ${parseException?.message}")
+
+                throw parseException ?: IllegalStateException("M3U8 parsing failed with unknown error")
+            }
+
+            android.util.Log.d("DownloadTest", "downloadHLS - Segments parsed, total: ${items.size}")
+            
             metadata.hlsTotal = items.size
             metadata.type = DownloadType.IsDownloading
+            android.util.Log.d("DownloadTest", "downloadHLS - Metadata updated, starting download jobs")
 
             val currentMutex = Mutex()
             val current = (startAt until items.size).iterator()
@@ -1546,6 +1678,18 @@ object VideoDownloadManager {
         try {
             val info =
                 context.getKey<DownloadedFileInfo>(KEY_DOWNLOAD_INFO, id.toString()) ?: return null
+            
+            // Check if extraInfo contains a content URI (for SAF files)
+            val contentUri = info.extraInfo
+            if (contentUri != null && contentUri.startsWith("content://")) {
+                android.util.Log.d("LocalLibraryTest", "Using content URI from extraInfo: $contentUri")
+                return DownloadedFileInfoResult(
+                    -1, // fileLength is -1 for content URIs
+                    info.totalBytes,
+                    android.net.Uri.parse(contentUri)
+                )
+            }
+            
             val file = info.toFile(context)
 
             // only delete the key if the file is not found
@@ -1699,7 +1843,8 @@ object VideoDownloadManager {
 
             downloadStatusEvent.invoke(Pair(id, status))
             downloadStatus[id] = status
-            downloadEvent.invoke(Pair(id, DownloadActionType.Stop))
+            // Removed downloadEvent.invoke(Pair(id, DownloadActionType.Stop)) to prevent cancellation loop
+            // The downloadStatusEvent is sufficient to update the UI and queue
 
             // Force refresh the queue when failed.
             // May lead to some redundant calls, but ensures that the queue is always up to date.
@@ -1870,6 +2015,12 @@ object VideoDownloadManager {
             subs: List<SubtitleData>?
         ) {
             val downloadItem = downloadQueueWrapper.downloadItem ?: return
+            android.util.Log.d("DownloadTest", "downloadEpisodeWithLinks - Starting with ${links.size} links")
+            android.util.Log.d("DownloadTest", "downloadEpisodeWithLinks - downloadItem.episode.id: ${downloadItem.episode.id}")
+            android.util.Log.d("DownloadTest", "downloadEpisodeWithLinks - downloadItem.resultName: ${downloadItem.resultName}")
+            android.util.Log.d("DownloadTest", "downloadEpisodeWithLinks - downloadItem.resultType: ${downloadItem.resultType}")
+            android.util.Log.d("DownloadTest", "downloadEpisodeWithLinks - downloadItem.isMovie: ${downloadItem.isMovie}")
+            
             try {
                 // Prepare visual keys
                 setKey(
@@ -1912,6 +2063,7 @@ object VideoDownloadManager {
                     )
                 )
 
+                android.util.Log.d("DownloadTest", "downloadEpisodeWithLinks - About to call getDownloadEpisodeMetadata")
                 val meta =
                     getDownloadEpisodeMetadata(
                         downloadItem.episode,
@@ -1921,6 +2073,7 @@ object VideoDownloadManager {
                         downloadItem.isMovie,
                         downloadItem.resultType
                     )
+                android.util.Log.d("DownloadTest", "downloadEpisodeWithLinks - getDownloadEpisodeMetadata returned successfully")
 
                 val folder =
                     getFolder(downloadItem.resultType, downloadItem.resultName)
@@ -1982,7 +2135,8 @@ object VideoDownloadManager {
         private suspend fun downloadEpisodeWithoutLinks() {
             val downloadItem = downloadQueueWrapper.downloadItem ?: return
 
-            val generator = RepoLinkGenerator(listOf(downloadItem.episode))
+            Log.d(TAG, "downloadEpisodeWithoutLinks: Starting link loading for episode ${downloadItem.episode.id}")
+            val generator = RepoLinkGenerator(listOf(downloadItem.episode), resultUrl = downloadItem.resultUrl)
             val currentLinks = mutableSetOf<ExtractorLink>()
             val currentSubs = mutableSetOf<SubtitleData>()
             val meta =
@@ -2012,12 +2166,14 @@ object VideoDownloadManager {
             }
 
             linkLoadingJob = ioSafe {
+                Log.d(TAG, "downloadEpisodeWithoutLinks: Starting RepoLinkGenerator.generateLinks")
                 generator.generateLinks(
                     clearCache = false,
                     sourceTypes = LOADTYPE_INAPP_DOWNLOAD,
                     callback = {
                         it.first?.let { link ->
                             currentLinks.add(link)
+                            Log.d(TAG, "downloadEpisodeWithoutLinks: Found link: ${link.url}")
                         }
                     },
                     subtitleCallback = { sub ->
@@ -2027,6 +2183,7 @@ object VideoDownloadManager {
 
             // Wait for link loading completion
             linkLoadingJob?.join()
+            Log.d(TAG, "downloadEpisodeWithoutLinks: Link loading job completed. isCancelled=${linkLoadingJob?.isCancelled}, links found=${currentLinks.size}")
 
             // Remove link loading notification
             NotificationManagerCompat.from(context)
@@ -2035,9 +2192,11 @@ object VideoDownloadManager {
             if (linkLoadingJob?.isCancelled == true) {
                 // Same as if no links, but no toast.
                 // Cancelled link loading is presumed to be user initiated
+                Log.d(TAG, "downloadEpisodeWithoutLinks: Link loading was cancelled")
                 isCancelled = true
                 return
             } else if (currentLinks.isEmpty()) {
+                Log.e(TAG, "downloadEpisodeWithoutLinks: No links found after link loading")
                 main {
                     showToast(
                         R.string.no_links_found_toast,
@@ -2047,6 +2206,7 @@ object VideoDownloadManager {
                 isFailed = true
                 return
             } else {
+                Log.d(TAG, "downloadEpisodeWithoutLinks: Found ${currentLinks.size} links, starting download")
                 main {
                     showToast(
                         R.string.download_started,

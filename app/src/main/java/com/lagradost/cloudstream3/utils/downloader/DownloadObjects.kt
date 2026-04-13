@@ -70,6 +70,7 @@ object DownloadObjects {
         @JsonProperty("description") val description: String?,
         @JsonProperty("date") val date: Long?,
         @JsonProperty("cacheTime") val cacheTime: Long,
+        @JsonProperty("data") val data: String? = null,
         override val id: Int,
     ) : DownloadCached(id) {
         @JsonProperty("rating", access = JsonProperty.Access.WRITE_ONLY)

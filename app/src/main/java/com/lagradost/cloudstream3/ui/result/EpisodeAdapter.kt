@@ -274,6 +274,21 @@ class EpisodeAdapter(
 
                     episodeRating.isGone = episodeRating.text.isNullOrBlank()
 
+                    // Set airdate
+                    item.airDate?.let { airDate ->
+                        val dateText = try {
+                            val sdf = java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale.getDefault())
+                            sdf.format(java.util.Date(airDate))
+                        } catch (e: Exception) {
+                            null
+                        }
+                        episodeDate.text = dateText ?: ""
+                        episodeDate.isVisible = !dateText.isNullOrBlank()
+                    } ?: run {
+                        episodeDate.text = ""
+                        episodeDate.isVisible = false
+                    }
+
                     episodeDescript.apply {
                         text = item.description.html()
                         isGone = text.isNullOrBlank()
@@ -457,6 +472,21 @@ class EpisodeAdapter(
                                 isVisible = displayPos > 0L
                             }
                         }
+                    }
+
+                    // Set airdate
+                    item.airDate?.let { airDate ->
+                        val dateText = try {
+                            val sdf = java.text.SimpleDateFormat("dd MMM yyyy", java.util.Locale.getDefault())
+                            sdf.format(java.util.Date(airDate))
+                        } catch (e: Exception) {
+                            null
+                        }
+                        episodeDate.text = dateText ?: ""
+                        episodeDate.isVisible = !dateText.isNullOrBlank()
+                    } ?: run {
+                        episodeDate.text = ""
+                        episodeDate.isVisible = false
                     }
 
                     itemView.setOnClickListener {

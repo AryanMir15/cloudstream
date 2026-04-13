@@ -25,6 +25,7 @@ class RepoLinkGenerator(
     episodes: List<ResultEpisode>,
     currentIndex: Int = 0,
     val page: LoadResponse? = null,
+    val resultUrl: String? = null,
 ) : VideoGenerator<ResultEpisode>(episodes, currentIndex) {
     companion object {
         const val TAG = "RepoLink"

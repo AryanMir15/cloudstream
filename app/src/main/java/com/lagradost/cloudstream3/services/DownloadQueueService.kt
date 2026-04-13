@@ -163,21 +163,37 @@ class DownloadQueueService : Service() {
             // Early return, to prevent waiting for plugins in safe mode
             if (lastError != null) return@ioSafe
 
-            // Try to ensure all plugins are loaded before starting the downloader.
-            // To prevent infinite stalls we use a timeout of 15 seconds, it is judged as long enough
-            val timeout = 15.seconds
-            val timeTaken = withTimeoutOrNull(timeout) {
-                measureTimeMillis {
-                    while (!(PluginManager.loadedOnlinePlugins && PluginManager.loadedLocalPlugins)) {
-                        delay(100.milliseconds)
+            // Check if any downloads in the queue need to load links (require plugins)
+            // If all downloads already have links, we can start without waiting for plugins
+            val needsPlugins = DownloadQueueManager.queue.value.any { it.downloadItem?.links.isNullOrEmpty() }
+            
+            if (needsPlugins) {
+                // Trigger plugin loading if not already loaded
+                // This ensures plugins are available even if MainActivity hasn't loaded them yet
+                if (!PluginManager.loadedLocalPlugins) {
+                    Log.d(TAG, "Loading local plugins...")
+                    try {
+                        @Suppress("DEPRECATION_ERROR")
+                        PluginManager.___DO_NOT_CALL_FROM_A_PLUGIN_loadAllLocalPlugins(context, false)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to load local plugins", e)
                     }
                 }
+                
+                if (!PluginManager.loadedOnlinePlugins) {
+                    Log.d(TAG, "Loading online plugins...")
+                    try {
+                        @Suppress("DEPRECATION_ERROR")
+                        PluginManager.___DO_NOT_CALL_FROM_A_PLUGIN_loadAllOnlinePlugins(context)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to load online plugins", e)
+                    }
+                }
+                
+                Log.d(TAG, "Plugins loaded, starting downloads")
+            } else {
+                Log.d(TAG, "All downloads have cached links, starting without waiting for plugins")
             }
-
-            debugWarning({ timeTaken == null || timeTaken > 3_000 }, {
-                "Abnormally long downloader startup time of: ${timeTaken ?: timeout.inWholeMilliseconds}ms"
-            })
-            debugAssert({ timeTaken == null }, { "Downloader startup should not time out" })
 
             totalDownloadFlow
                 .takeWhile { (instances, queue) ->
@@ -191,7 +207,16 @@ class DownloadQueueService : Service() {
                 .collect { (_, queue, currentDownloads) ->
                     // Remove completed or failed
                     val newInstances = _downloadInstances.updateAndGet { currentInstances ->
-                        currentInstances.filterNot { it.isCompleted || it.isFailed || it.isCancelled }
+                        val filtered = currentInstances.filterNot { it.isCompleted || it.isFailed || it.isCancelled }
+                        if (filtered.size != currentInstances.size) {
+                            Log.d(TAG, "Filtered ${currentInstances.size - filtered.size} instances (completed/failed/cancelled)")
+                            currentInstances.forEach { instance ->
+                                if (instance.isCompleted) Log.d(TAG, "Instance ${instance.downloadQueueWrapper.id} is completed")
+                                if (instance.isFailed) Log.d(TAG, "Instance ${instance.downloadQueueWrapper.id} is failed")
+                                if (instance.isCancelled) Log.d(TAG, "Instance ${instance.downloadQueueWrapper.id} is cancelled")
+                            }
+                        }
+                        filtered
                     }
 
                     val maxDownloads = VideoDownloadManager.maxConcurrentDownloads(context)

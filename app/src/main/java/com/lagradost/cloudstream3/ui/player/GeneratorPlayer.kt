@@ -525,19 +525,90 @@ class GeneratorPlayer : FullScreenPlayer() {
         val isLocalPlayback = allEpisodes?.any { it is ExtractorUri } == true
         
         allMeta = if (isLocalPlayback) {
-            // For local playback, load ALL cached episodes for this show
+            // For local playback, scan the folder for episodes like the entry list does
             val currentUri = allEpisodes?.firstOrNull { it is ExtractorUri } as? ExtractorUri
             val parentId = currentUri?.parentId
+            val basePath = currentUri?.basePath
+            val relativePath = currentUri?.relativePath
             
-            android.util.Log.d("EpisodeConverters", "Local playback detected, loading all cached episodes for parentId=$parentId")
+            android.util.Log.d("EpisodeConverters", "Local playback detected, scanning folder for episodes")
+            android.util.Log.d("EpisodeConverters", "basePath=$basePath, relativePath=$relativePath, parentId=$parentId")
             
+            // First load cached episodes
             val cachedEpisodes = loadAllCachedEpisodes(parentId)
             val cachedHeader = loadCachedHeader(parentId)
             
             android.util.Log.d("EpisodeConverters", "Loaded ${cachedEpisodes.size} cached episodes")
             
-            cachedEpisodes.mapIndexed { index, cachedEp ->
-                // Convert cached episode to ResultEpisode
+            // Then scan the folder for additional episodes
+            val folderEpisodes = mutableListOf<DownloadObjects.DownloadEpisodeCached>()
+            
+            if (basePath != null && relativePath != null) {
+                try {
+                    val baseFile = context?.let { com.lagradost.safefile.SafeFile.fromUri(it, android.net.Uri.parse(basePath)) }
+                    val targetDir = baseFile?.gotoDirectory(relativePath, false)
+                    
+                    android.util.Log.d("EpisodeConverters", "Target dir exists: ${targetDir?.exists()}")
+                    
+                    if (targetDir != null && targetDir.exists() == true) {
+                        val allFiles = targetDir.listFiles()
+                        android.util.Log.d("EpisodeConverters", "Files in folder: ${allFiles?.map { it.name() }?.joinToString(", ")}")
+                        
+                        allFiles?.forEach { file ->
+                            val name = file.name() ?: return@forEach
+                            val lowerName = name.lowercase()
+                            
+                            // Extract episode number from filename
+                            val episodeNumber = extractEpisodeNumber(lowerName)
+                            if (episodeNumber != null) {
+                                android.util.Log.d("EpisodeConverters", "Found episode $episodeNumber in file: $name")
+                                
+                                // Generate a unique ID for this episode (negative hash based on episode number and parent)
+                                val episodeId = -(episodeNumber + (kotlin.math.abs(parentId ?: 0)) * 1000)
+                                
+                                // Check if already in cache
+                                val alreadyCached = cachedEpisodes.any { it.episode == episodeNumber }
+                                
+                                if (!alreadyCached) {
+                                    folderEpisodes.add(
+                                        DownloadObjects.DownloadEpisodeCached(
+                                            name = name.removeSuffix(".mkv").removeSuffix(".mp4").removeSuffix(".webm"),
+                                            episode = episodeNumber,
+                                            id = episodeId,
+                                            parentId = parentId ?: 0,
+                                            poster = null,
+                                            season = null,
+                                            score = null,
+                                            description = null,
+                                            date = null,
+                                            cacheTime = System.currentTimeMillis(),
+                                            data = null
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    android.util.Log.e("EpisodeConverters", "Error scanning folder", e)
+                }
+            }
+            
+            android.util.Log.d("EpisodeConverters", "Found ${folderEpisodes.size} additional episodes from folder")
+            
+            // Combine cached and folder episodes
+            val allEpisodesList = (cachedEpisodes + folderEpisodes)
+                .distinctBy { it.episode }
+                .sortedBy { it.episode }
+            
+            android.util.Log.d("EpisodeConverters", "Total episodes: ${allEpisodesList.size}")
+            
+            allEpisodesList.mapIndexed { index, cachedEp ->
+                // Try to get airdate from cached episode data if available
+                val cachedEpisodeWithDate = loadCachedEpisode(cachedEp.id)
+                val airDate = cachedEpisodeWithDate?.date ?: cachedEp.date
+                
+                // Convert to ResultEpisode
                 ResultEpisode(
                     headerName = cachedHeader?.name ?: "",
                     name = cachedEp.name ?: "Episode ${cachedEp.episode}",
@@ -557,7 +628,8 @@ class GeneratorPlayer : FullScreenPlayer() {
                     tvType = cachedHeader?.type ?: TvType.Anime,
                     parentId = cachedEp.parentId,
                     videoWatchState = getVideoWatchState(cachedEp.id) ?: VideoWatchState.None,
-                    totalEpisodeIndex = cachedEp.episode
+                    totalEpisodeIndex = cachedEp.episode,
+                    airDate = airDate
                 )
             }
         } else {

@@ -1083,11 +1083,16 @@ class CS3IPlayer : IPlayer {
                         else -> isLayout(PHONE or EMULATOR) to false
                     }
 
-                    val factory = if (isSoftwareDecodingEnabled) {
+                    // Check if we're playing a content URI (SAF) - force FFmpeg audio renderer
+                    // because MediaCodec doesn't work properly with SAF content URIs
+                    val isContentUri = currentDownloadedFile?.uri?.toString()?.startsWith("content://") == true
+                    
+                    val factory = if (isSoftwareDecodingEnabled || isContentUri) {
                         FixedNextRenderersFactory(context).apply {
                             setEnableDecoderFallback(true)
+                            // Force FFmpeg for content URIs to avoid MediaCodec decoder errors
                             setExtensionRendererMode(
-                                if (isSoftwareDecodingPreferred)
+                                if (isSoftwareDecodingPreferred || isContentUri)
                                     DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
                                 else
                                     DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON

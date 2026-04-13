@@ -137,7 +137,12 @@ class PlayerGeneratorViewModel : ViewModel() {
     }
 
     fun loadThisEpisode(index:Int) {
+        android.util.Log.d("PlayerGeneratorViewModel", "loadThisEpisode: index=$index")
+        val currentBefore = generator?.getCurrent()
+        android.util.Log.d("PlayerGeneratorViewModel", "Before goto: current=$currentBefore")
         generator?.goto(index)
+        val currentAfter = generator?.getCurrent()
+        android.util.Log.d("PlayerGeneratorViewModel", "After goto: current=$currentAfter")
         loadLinks()
     }
 

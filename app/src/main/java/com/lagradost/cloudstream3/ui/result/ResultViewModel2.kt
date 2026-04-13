@@ -60,6 +60,7 @@ import com.lagradost.cloudstream3.ui.player.RepoLinkGenerator
 import com.lagradost.cloudstream3.ui.player.SubtitleData
 import com.lagradost.cloudstream3.ui.result.EpisodeAdapter.Companion.getPlayerAction
 import com.lagradost.cloudstream3.ui.result.EpisodeClickEvent
+import com.lagradost.cloudstream3.utils.downloader.DownloadObjects.DownloadedFileInfoResult
 import com.lagradost.cloudstream3.ui.result.START_ACTION_LOAD_EP
 import com.lagradost.cloudstream3.ui.result.START_ACTION_RESUME_LATEST
 import com.lagradost.cloudstream3.ui.result.getWatchProgress
@@ -1466,18 +1467,22 @@ class ResultViewModel2 : ViewModel() {
                         
                         // Validate that cached file belongs to current show
                         // Episode IDs can be same across shows, so verify path matches
-                        if (length > 0 && fileInfo != null) {
-                            val expectedFolder = com.lagradost.cloudstream3.utils.downloader.DownloadFileManagement.getFolder(
-                                currentResponse?.type ?: TvType.Anime,
-                                currentResponse?.name ?: "Unknown"
-                            )
+                        // Accept files even if length is -1 (content URIs)
+                        if ((length > 0 || length == -1L) && fileInfo != null) {
                             val cachedPath = fileInfo.path.toString()
-                            if (!cachedPath.contains(expectedFolder, ignoreCase = true)) {
-                                android.util.Log.d("LocalLibraryTest", "Cached file doesn't match current show! Expected: $expectedFolder, Got: $cachedPath")
-                                // Clear stale cache
-                                CloudStreamApp.removeKey(VideoDownloadManager.KEY_DOWNLOAD_INFO, click.data.id.toString())
-                                fileInfo = null
-                                length = 0
+                            // Skip folder validation for content URIs (they're already scoped to the correct tree)
+                            if (!cachedPath.startsWith("content://")) {
+                                val expectedFolder = com.lagradost.cloudstream3.utils.downloader.DownloadFileManagement.getFolder(
+                                    currentResponse?.type ?: TvType.Anime,
+                                    currentResponse?.name ?: "Unknown"
+                                )
+                                if (!cachedPath.contains(expectedFolder, ignoreCase = true)) {
+                                    android.util.Log.d("LocalLibraryTest", "Cached file doesn't match current show! Expected: $expectedFolder, Got: $cachedPath")
+                                    // Clear stale cache
+                                    CloudStreamApp.removeKey(VideoDownloadManager.KEY_DOWNLOAD_INFO, click.data.id.toString())
+                                    fileInfo = null
+                                    length = 0
+                                }
                             }
                         }
                         
@@ -1531,9 +1536,11 @@ class ResultViewModel2 : ViewModel() {
                                             lowerName.contains("s${targetSeason}e$targetEpisode")
                                         } else false
                                         
-                                        // Pattern 3: Just the number at start
+                                        // Pattern 3: Just the number at start (e.g., "1. Title", "01 Title")
                                         val startsWithEp = lowerName.startsWith("$targetEpisode.") ||
-                                                          lowerName.startsWith("$targetEpisode ")
+                                                          lowerName.startsWith("$targetEpisode ") ||
+                                                          lowerName.matches(Regex("^${targetEpisode}[.\\s].*")) ||
+                                                          lowerName.matches(Regex("^0*${targetEpisode}[.\\s].*"))
                                         
                                         val matched = hasEpisode || seasonEpPattern || startsWithEp
                                         if (matched) {
@@ -1546,18 +1553,127 @@ class ResultViewModel2 : ViewModel() {
                                         length = matchingFile.length() ?: 0L
                                         android.util.Log.d("LocalLibraryTest", "Smart match found: ${matchingFile.name()} with length: $length")
                                         
-                                        // Create a temporary DownloadedFileInfo for playback
-                                        CloudStreamApp.setKey(
-                                            VideoDownloadManager.KEY_DOWNLOAD_INFO,
-                                            click.data.id.toString(),
-                                            DownloadObjects.DownloadedFileInfo(
-                                                totalBytes = length,
-                                                relativePath = folderPath,
-                                                displayName = matchingFile.name() ?: "episode_$targetEpisode.mp4",
-                                                basePath = basePath,
-                                                linkHash = 0
+                                        // For content URIs, find the actual video file inside the directory
+                                        try {
+                                            val fileUri = matchingFile.uriOrThrow()
+                                            android.util.Log.d("LocalLibraryTest", "File URI: $fileUri")
+                                            val isContentUri = fileUri.toString().startsWith("content://")
+                                            android.util.Log.d("LocalLibraryTest", "Is content URI: $isContentUri")
+                                            
+                                            if (isContentUri) {
+                                                // Check if this is a directory (EISDIR error)
+                                                val actualFileUri = if (matchingFile.isDirectory() == true) {
+                                                    // List files in directory and find the video file
+                                                    android.util.Log.d("LocalLibraryTest", "File is a directory, listing contents")
+                                                    val filesInDir = matchingFile.listFiles()
+                                                    android.util.Log.d("LocalLibraryTest", "Files in directory: ${filesInDir?.map { it.name() }?.joinToString(", ")}")
+                                                    
+                                                    // Find video file (mp4, mkv, webm, etc.)
+                                                    val videoFile = filesInDir?.firstOrNull { file ->
+                                                        val name = file.name()?.lowercase() ?: ""
+                                                        name.endsWith(".mp4") || name.endsWith(".mkv") || 
+                                                        name.endsWith(".webm") || name.endsWith(".avi") ||
+                                                        name.endsWith(".m4v") || name.endsWith(".mov")
+                                                    }
+                                                    
+                                                    if (videoFile != null) {
+                                                        android.util.Log.d("LocalLibraryTest", "Found video file: ${videoFile.name()}")
+                                                        videoFile.uriOrThrow()
+                                                    } else {
+                                                        android.util.Log.e("LocalLibraryTest", "No video file found in directory")
+                                                        fileUri
+                                                    }
+                                                } else {
+                                                    fileUri
+                                                }
+                                                
+                                                // Cache the content URI in a separate key
+                                                CloudStreamApp.setKey(
+                                                    "CONTENT_URI_${click.data.id}",
+                                                    actualFileUri.toString()
+                                                )
+                                                android.util.Log.d("LocalLibraryTest", "Cached content URI: $actualFileUri")
+                                                
+                                                // Clear old cache to avoid stale directory URI
+                                                CloudStreamApp.removeKey(VideoDownloadManager.KEY_DOWNLOAD_INFO, click.data.id.toString())
+                                                
+                                                // Also update the DownloadedFileInfo cache with the content URI in extraInfo
+                                                // so getDownloadFileInfo can return it directly
+                                                CloudStreamApp.setKey(
+                                                    VideoDownloadManager.KEY_DOWNLOAD_INFO,
+                                                    click.data.id.toString(),
+                                                    DownloadObjects.DownloadedFileInfo(
+                                                        totalBytes = -1,
+                                                        relativePath = folderPath,
+                                                        displayName = matchingFile.name() ?: "episode_$targetEpisode",
+                                                        basePath = basePath,
+                                                        linkHash = 0,
+                                                        extraInfo = actualFileUri.toString() // Store full content URI here
+                                                    )
+                                                )
+                                                android.util.Log.d("LocalLibraryTest", "Updated DownloadedFileInfo cache with content URI in extraInfo")
+                                                
+                                                // Update download status to IsDone so entry shows as downloaded
+                                                com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.downloadStatus[click.data.id] = 
+                                                    com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.DownloadType.IsDone
+                                                // Persist download status to storage
+                                                CloudStreamApp.setKey(
+                                                    com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.KEY_DOWNLOAD_STATUS,
+                                                    click.data.id.toString(),
+                                                    com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.DownloadType.IsDone.name
+                                                )
+                                                android.util.Log.d("LocalLibraryTest", "Updated downloadStatus to IsDone for episode ${click.data.id}")
+                                                
+                                                length = -1L // Signal to use direct playback
+                                            } else {
+                                                // Clear old cache to avoid stale data
+                                                CloudStreamApp.removeKey(VideoDownloadManager.KEY_DOWNLOAD_INFO, click.data.id.toString())
+                                                
+                                                // Create a temporary DownloadedFileInfo for playback
+                                                CloudStreamApp.setKey(
+                                                    VideoDownloadManager.KEY_DOWNLOAD_INFO,
+                                                    click.data.id.toString(),
+                                                    DownloadObjects.DownloadedFileInfo(
+                                                        totalBytes = length,
+                                                        relativePath = folderPath,
+                                                        displayName = matchingFile.name() ?: "episode_$targetEpisode.mp4",
+                                                        basePath = basePath,
+                                                        linkHash = 0
+                                                    )
+                                                )
+                                                
+                                                // Update download status to IsDone so entry shows as downloaded
+                                                com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.downloadStatus[click.data.id] = 
+                                                    com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.DownloadType.IsDone
+                                                // Persist download status to storage
+                                                CloudStreamApp.setKey(
+                                                    com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.KEY_DOWNLOAD_STATUS,
+                                                    click.data.id.toString(),
+                                                    com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.DownloadType.IsDone.name
+                                                )
+                                                android.util.Log.d("LocalLibraryTest", "Updated downloadStatus to IsDone for episode ${click.data.id}")
+                                            }
+                                        } catch (e: Exception) {
+                                            android.util.Log.e("LocalLibraryTest", "Error getting file URI", e)
+                                            // Clear old cache to avoid stale data
+                                            CloudStreamApp.removeKey(VideoDownloadManager.KEY_DOWNLOAD_INFO, click.data.id.toString())
+                                            // Fallback to regular caching
+                                            CloudStreamApp.setKey(
+                                                VideoDownloadManager.KEY_DOWNLOAD_INFO,
+                                                click.data.id.toString(),
+                                                DownloadObjects.DownloadedFileInfo(
+                                                    totalBytes = length,
+                                                    relativePath = folderPath,
+                                                    displayName = matchingFile.name() ?: "episode_$targetEpisode.mp4",
+                                                    basePath = basePath,
+                                                    linkHash = 0
+                                                )
                                             )
-                                        )
+                                            
+                                            // Update download status to IsDone so entry shows as downloaded
+                                            com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.downloadStatus[click.data.id] = 
+                                                com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.DownloadType.IsDone
+                                        }
                                         
                                         // Also cache episode info for next episode navigation
                                         val parentId = click.data.parentId ?: currentResponse?.getId() ?: 0
@@ -1575,7 +1691,8 @@ class ResultViewModel2 : ViewModel() {
                                                 score = click.data.score,
                                                 description = click.data.description,
                                                 date = click.data.airDate,
-                                                cacheTime = System.currentTimeMillis()
+                                                cacheTime = System.currentTimeMillis(),
+                                                data = click.data.data
                                             )
                                         )
                                         
@@ -1634,6 +1751,10 @@ class ResultViewModel2 : ViewModel() {
                                                     )
                                                 )
                                                 
+                                                // Update download status to IsDone so entry shows as downloaded
+                                                com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.downloadStatus[click.data.id] = 
+                                                    com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.DownloadType.IsDone
+                                                
                                                 // Also cache episode info for next episode navigation
                                                 val parentId = click.data.parentId ?: currentResponse?.getId() ?: 0
                                                 CloudStreamApp.setKey(
@@ -1649,7 +1770,8 @@ class ResultViewModel2 : ViewModel() {
                                                         score = click.data.score,
                                                         description = click.data.description,
                                                         date = click.data.airDate,
-                                                        cacheTime = System.currentTimeMillis()
+                                                        cacheTime = System.currentTimeMillis(),
+                                                        data = click.data.data
                                                     )
                                                 )
                                                 
@@ -1688,7 +1810,21 @@ class ResultViewModel2 : ViewModel() {
                         
                         android.util.Log.d("LocalLibraryTest", "Clicking episode ${click.data.id}. Found fileInfo: $fileInfo. Length: $length")
                         
-                        if (length > 0) {
+                        // Check if we have a cached content URI
+                        val cachedContentUri = getKey<String>("CONTENT_URI_${click.data.id}")
+                        if (cachedContentUri != null) {
+                            android.util.Log.d("LocalLibraryTest", "Using cached content URI for playback: $cachedContentUri")
+                            // Create a temporary fileInfo for content URI playback
+                            fileInfo = DownloadedFileInfoResult(
+                                fileLength = -1,
+                                totalBytes = -1,
+                                path = android.net.Uri.parse(cachedContentUri)
+                            )
+                            length = -1L
+                        }
+                        
+                        // Accept files with length > 0 or length == -1 (content URIs)
+                        if (length > 0 || length == -1L) {
                             android.util.Log.d("LocalLibraryTest", "Playing local file via DownloadButtonSetup for episode ${click.data.id}")
                             // If downloaded, simulate the click that plays the downloaded file
                             DownloadButtonSetup.handleDownloadClick(
@@ -1705,6 +1841,7 @@ class ResultViewModel2 : ViewModel() {
                                         description = click.data.description,
                                         date = click.data.airDate,
                                         cacheTime = System.currentTimeMillis(),
+                                        data = click.data.data
                                     )
                                 )
                             )
@@ -2796,7 +2933,8 @@ class ResultViewModel2 : ViewModel() {
                                     score = i.score,
                                     description = i.description,
                                     date = i.date,
-                                    cacheTime = System.currentTimeMillis()
+                                    cacheTime = System.currentTimeMillis(),
+                                    data = i.data
                                 )
                             )
 
@@ -2871,7 +3009,8 @@ class ResultViewModel2 : ViewModel() {
                                 score = episode.score,
                                 description = episode.description,
                                 date = episode.date,
-                                cacheTime = System.currentTimeMillis()
+                                cacheTime = System.currentTimeMillis(),
+                                data = episode.data
                             )
                         )
 
@@ -3143,28 +3282,50 @@ class ResultViewModel2 : ViewModel() {
         )
     }
 
-    private fun loadOfflineEpisodes(parentId: Int, cachedHeader: DownloadObjects.DownloadHeaderCached, apiName: String) {
+    private fun loadOfflineEpisodes(parentId: Int, cachedHeader: DownloadObjects.DownloadHeaderCached, apiName: String, validUrl: String, api: MainAPI) {
         ioSafe {
             val cachedEpisodes = getKeys(DOWNLOAD_EPISODE_CACHE)
                 ?.mapNotNull { getKey<DownloadObjects.DownloadEpisodeCached>(it) }
                 ?.filter { it.parentId == parentId }
                 ?.sortedWith(compareBy<DownloadObjects.DownloadEpisodeCached> { it.season ?: 0 }
                     .thenBy { it.episode })
+                ?.distinctBy { it.episode }
             
             if (cachedEpisodes.isNullOrEmpty()) {
-                android.util.Log.d("LocalLibraryTest", "No cached episodes found for parentId: $parentId")
+                android.util.Log.d("LocalLibraryTest", "No cached episodes found for parentId: $parentId, falling back to API")
+                // Fall back to loading from API when no cached episodes are found
+                // This prevents infinite loading skeleton when cache is cleared
+                val repo = APIRepository(api)
+                when (val data = repo.load(validUrl)) {
+                    is Resource.Failure -> {
+                        _page.postValue(data)
+                    }
+                    is Resource.Success<*> -> {
+                        if (!isActive) return@ioSafe
+                        val loadResponse = data.value as? LoadResponse ?: return@ioSafe
+                        postSuccessful(loadResponse, cachedHeader.id, updateEpisodes = true, updateFillers = false, apiRepository = repo)
+                    }
+                    else -> {
+                        // Handle Loading state or other states
+                        return@ioSafe
+                    }
+                }
                 return@ioSafe
             }
 
             android.util.Log.d("LocalLibraryTest", "Loaded ${cachedEpisodes.size} cached episodes for offline mode")
             android.util.Log.d("LocalLibraryTest", "Cached header - score: ${cachedHeader.score}, showStatus: ${cachedHeader.showStatus}, year: ${cachedHeader.year}, episodeCount: ${cachedHeader.episodeCount}, actors: ${cachedHeader.actors}")
+            android.util.Log.d("LocalLibraryTest", "Cached header - url: ${cachedHeader.url}")
             cachedEpisodes.forEach {
-                android.util.Log.d("LocalLibraryTest", "Cached episode - id: ${it.id}, name: ${it.name}, date: ${it.date}, score: ${it.score}")
+                android.util.Log.d("LocalLibraryTest", "Cached episode - id: ${it.id}, name: ${it.name}, episode: ${it.episode}, date: ${it.date}, score: ${it.score}, data: ${it.data}")
             }
 
             // Convert cached episodes to ResultEpisode format
             val resultEpisodes = cachedEpisodes.mapIndexed { index, cached ->
                 val posDur = getViewPos(cached.id)
+                // Use cached episode data if available
+                // If not available, use empty string - the app will load from API when needed
+                val episodeData = cached.data ?: ""
                 ResultEpisode(
                     headerName = cachedHeader.name ?: "",
                     name = cached.name ?: "Episode ${cached.episode}",
@@ -3172,7 +3333,7 @@ class ResultViewModel2 : ViewModel() {
                     episode = cached.episode,
                     seasonIndex = cached.season?.let { it - 1 },
                     season = cached.season,
-                    data = "",
+                    data = episodeData,
                     apiName = apiName,
                     id = cached.id,
                     index = index,
@@ -3397,40 +3558,39 @@ class ResultViewModel2 : ViewModel() {
             val repo = APIRepository(api)
             currentRepo = repo
 
-            when (val data = repo.load(validUrl)) {
-                is Resource.Failure -> {
-                    // OFFLINE FALLBACK: Try to use cached header data if available
-                    // First try exact URL match, then try ID match to avoid wrong cached entry
-                    val allCachedHeaders = getKeys(DOWNLOAD_HEADER_CACHE)
-                        ?.mapNotNull { getKey<DownloadObjects.DownloadHeaderCached>(it) }
-                    
-                    android.util.Log.d("LocalLibraryTest", "API failed for url: $url, searching among ${allCachedHeaders?.size} cached headers")
-                    allCachedHeaders?.forEach { android.util.Log.d("LocalLibraryTest", "  Cached: ${it.name} (url: ${it.url}, id: ${it.id})") }
-                    
-                    val cachedHeader = allCachedHeaders
-                        ?.find { it.url == url }
-                        ?: allCachedHeaders
-                            ?.find { it.id.toString() == url }
-                    
-                    android.util.Log.d("LocalLibraryTest", "Matched cached header: ${cachedHeader?.name} (url: ${cachedHeader?.url}, id: ${cachedHeader?.id})")
-                    
-                    if (cachedHeader != null) {
-                        android.util.Log.d("LocalLibraryTest", "API failed, using cached header for: ${cachedHeader.name} (url: $url)")
-                        // Create a minimal LoadResponse from cached data for local playback
-                        val offlineResponse = createOfflineLoadResponse(cachedHeader, url, apiName)
-                        postSuccessful(
-                            offlineResponse,
-                            cachedHeader.id,
-                            updateEpisodes = true,
-                            updateFillers = false,
-                            apiRepository = repo
-                        )
-                        // Load episodes from cache
-                        loadOfflineEpisodes(cachedHeader.id, cachedHeader, apiName)
-                    } else {
+            // CACHE-FIRST APPROACH: Check cache first, then API if cache not found
+            val allCachedHeaders = getKeys(DOWNLOAD_HEADER_CACHE)
+                ?.mapNotNull { getKey<DownloadObjects.DownloadHeaderCached>(it) }
+            
+            android.util.Log.d("LocalLibraryTest", "Checking cache first for url: $url, found ${allCachedHeaders?.size} cached headers")
+            allCachedHeaders?.forEach { android.util.Log.d("LocalLibraryTest", "  Cached: ${it.name} (url: ${it.url}, id: ${it.id})") }
+            
+            val cachedHeader = allCachedHeaders
+                ?.find { it.url == url }
+                ?: allCachedHeaders
+                    ?.find { it.id.toString() == url }
+            
+            android.util.Log.d("LocalLibraryTest", "Matched cached header: ${cachedHeader?.name} (url: ${cachedHeader?.url}, id: ${cachedHeader?.id})")
+            
+            if (cachedHeader != null) {
+                android.util.Log.d("LocalLibraryTest", "Using cached header for: ${cachedHeader.name} (url: $url)")
+                // Create a minimal LoadResponse from cached data for local playback
+                val offlineResponse = createOfflineLoadResponse(cachedHeader, url, apiName)
+                postSuccessful(
+                    offlineResponse,
+                    cachedHeader.id,
+                    updateEpisodes = true,
+                    updateFillers = false,
+                    apiRepository = repo
+                )
+                // Load episodes from cache
+                loadOfflineEpisodes(cachedHeader.id, cachedHeader, apiName, validUrl, api)
+            } else {
+                android.util.Log.d("LocalLibraryTest", "No cached header found, trying API")
+                when (val data = repo.load(validUrl)) {
+                    is Resource.Failure -> {
                         _page.postValue(data)
                     }
-                }
 
                 is Resource.Success -> {
                     if (!isActive) return@ioSafe
@@ -3566,6 +3726,7 @@ class ResultViewModel2 : ViewModel() {
                 is Resource.Loading -> {
                     debugException { "Invalid load result" }
                 }
+            }
             }
         }
     }

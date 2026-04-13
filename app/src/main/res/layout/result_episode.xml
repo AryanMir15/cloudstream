@@ -98,6 +98,16 @@
             android:textColor="?attr/textColor"
             tools:text="Episode 1" />
 
+        <TextView
+            android:id="@+id/episode_date"
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:layout_gravity="center_vertical"
+            android:layout_marginStart="10dp"
+            android:gravity="center_vertical"
+            android:textColor="?attr/grayTextColor"
+            tools:text="15 Apr 2024" />
+
         <com.lagradost.cloudstream3.ui.download.button.PieFetchButton
             android:id="@+id/download_button"
             android:layout_width="@dimen/download_size"

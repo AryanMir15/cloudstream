@@ -178,9 +178,15 @@ object DownloadButtonSetup {
                             )
                         )
                     }
+                    
+                    android.util.Log.d("DownloadButtonSetup", "Generator items: ${items.map { "ep=${it.episode} id=${it.id}" }}")
+                    android.util.Log.d("DownloadButtonSetup", "Current episode: id=${click.data.id}, episode=${click.data.episode}")
+                    val targetIndex = items.indexOfFirst { it.id == click.data.id }
+                    android.util.Log.d("DownloadButtonSetup", "Target index in generator list: $targetIndex")
+                    
                     act.navigate(
                         R.id.global_to_navigation_player, GeneratorPlayer.newInstance(
-                            DownloadFileGenerator(items).apply { goto(items.indexOfFirst { it.id == click.data.id }) }
+                            DownloadFileGenerator(items).apply { goto(targetIndex) }
                         )
                     )
                 }

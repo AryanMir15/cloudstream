@@ -119,3 +119,39 @@ fun loadAllCachedEpisodes(parentId: Int?): List<DownloadObjects.DownloadEpisodeC
     
     return deduplicated.sortedBy { it.episode }
 }
+
+/**
+ * Extracts the episode number from a filename.
+ * Supports patterns like:
+ * - "Episode 1", "Episode 1.mkv"
+ * - "E1", "E01"
+ * - "S01E01"
+ * - "1. Title", "01 Title"
+ */
+fun extractEpisodeNumber(filename: String): Int? {
+    // Pattern 1: Episode X (any format)
+    val episodePattern = Regex("(?i)episode[\\s_-]*(\\d+)")
+    episodePattern.find(filename)?.let {
+        return it.groupValues[1].toInt()
+    }
+    
+    // Pattern 2: S01E01 format
+    val seasonEpPattern = Regex("S\\d+E(\\d+)", RegexOption.IGNORE_CASE)
+    seasonEpPattern.find(filename)?.let {
+        return it.groupValues[1].toInt()
+    }
+    
+    // Pattern 3: Just the number at start (e.g., "1. Title", "01 Title")
+    val startsWithNumber = Regex("^(\\d+)[.\\s_-]")
+    startsWithNumber.find(filename)?.let {
+        return it.groupValues[1].toInt()
+    }
+    
+    // Pattern 4: E01 or E1 format
+    val ePattern = Regex("\\bE(\\d+)\\b", RegexOption.IGNORE_CASE)
+    ePattern.find(filename)?.let {
+        return it.groupValues[1].toInt()
+    }
+    
+    return null
+}

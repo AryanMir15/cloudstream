@@ -85,6 +85,11 @@ class CloudStreamApp : Application(), SingletonImageLoader.Factory {
         }
 
         AppDebug.isDebug = BuildConfig.DEBUG
+        
+        // Load persisted download status
+        android.util.Log.d("CloudStreamApp", "Loading persisted download status on app startup")
+        com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.loadPersistedDownloadStatus(applicationContext)
+        android.util.Log.d("CloudStreamApp", "Download status after loading: ${com.lagradost.cloudstream3.utils.downloader.VideoDownloadManager.downloadStatus}")
     }
 
     override fun attachBaseContext(base: Context?) {

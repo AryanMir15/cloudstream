@@ -79,6 +79,94 @@ object M3u8Helper2 {
         Regex("""#EXTINF:(([0-9]*[.])?[0-9]+|).*\n(.+?\n)""") // fuck it we ball, who cares about the type anyways
     //Regex("""(.*\.(ts|jpg|html).*)""") //.jpg here 'case vizcloud uses .jpg instead of .ts
 
+    /**
+     * Normalize HLS tag prefixes to uppercase to handle case-insensitive M3U8 files.
+     * Some CDNs serve playlists with lowercase tags (e.g., #ext-x-stream-inf) which
+     * HlsPlaylistParser.parse() doesn't detect as master playlists.
+     */
+    private fun normalizeHlsTagPrefixes(text: String): String {
+        val lines = text.lines().toMutableList()
+
+        // Strip UTF-8 BOM from first line if present
+        if (lines.isNotEmpty() && lines[0].startsWith("\uFEFF")) {
+            lines[0] = lines[0].substring(1)
+        }
+
+        for (i in lines.indices) {
+            val line = lines[i]
+            // If line starts with # and contains :, uppercase the tag prefix
+            if (line.startsWith("#") && line.contains(":")) {
+                val colonIndex = line.indexOf(":")
+                val tagPrefix = line.substring(0, colonIndex).uppercase()
+                val restOfLine = line.substring(colonIndex)
+                lines[i] = tagPrefix + restOfLine
+            }
+        }
+
+        return lines.joinToString("\n")
+    }
+
+    /**
+     * Extract media segment links from a playlist using line-based scanning.
+     * This is more robust than the regex-based approach because it handles
+     * tags (like #EXT-X-KEY) that appear between #EXTINF and the segment URI.
+     */
+    private fun extractMediaSegmentLinks(playlistText: String, basePlaylistUrl: String): List<TsLink> {
+        val lines = playlistText.lines()
+        val segments = mutableListOf<TsLink>()
+        val relativeUrl = getParentLink(basePlaylistUrl)
+
+        var i = 0
+        while (i < lines.size) {
+            val line = lines[i].trim()
+
+            // Detect #EXTINF line
+            if (line.startsWith("#EXTINF")) {
+                // Parse duration from #EXTINF line
+                val durationMatch = Regex("""#EXTINF:(([0-9]*[.])?[0-9]+|)""").find(line)
+                val duration = durationMatch?.groupValues?.get(1)?.toDoubleOrNull()
+
+                // Skip empty lines and tags until we find the segment URI
+                var j = i + 1
+                while (j < lines.size) {
+                    val nextLine = lines[j].trim()
+
+                    // Skip empty lines
+                    if (nextLine.isEmpty()) {
+                        j++
+                        continue
+                    }
+
+                    // Skip tag lines (start with #)
+                    if (nextLine.startsWith("#")) {
+                        j++
+                        continue
+                    }
+
+                    // This is the segment URI
+                    val url = if (isNotCompleteUrl(nextLine)) {
+                        "$relativeUrl/${nextLine}"
+                    } else {
+                        nextLine
+                    }
+
+                    segments.add(TsLink(url = url, time = duration))
+                    i = j // Move to this line for next iteration
+                    break
+                }
+
+                // If we reached end without finding URI, move to next line
+                if (j >= lines.size) {
+                    i++
+                }
+            } else {
+                i++
+            }
+        }
+
+        return segments
+    }
+
     private fun absoluteExtensionDetermination(url: String): String? {
         val split = url.split("/")
         val gg: String = split[split.size - 1].split("?")[0]
@@ -129,9 +217,10 @@ object M3u8Helper2 {
     ): List<M3u8Helper.M3u8Stream> {
         val list = mutableListOf<M3u8Helper.M3u8Stream>()
         val response = app.get(m3u8.streamUrl, headers = m3u8.headers, verify = false).text
+        val normalizedResponse = normalizeHlsTagPrefixes(response)
         val parsed = HlsPlaylistParser.parse(
             m3u8.streamUrl,
-            response,
+            normalizedResponse,
         )
 
         var anyFound = false
@@ -158,8 +247,8 @@ object M3u8Helper2 {
 
         // If it is not a "Master Playlist", or if it does not contain any playable "Media Playlist" or if it should return itself
         if (parsed == null || !anyFound || returnThis) {
-            // Only include it if is a "Media Playlist" (any TS files are found), or if it is a "Master Playlist" (parsing is non null)
-            if (parsed != null || TS_EXTENSION_REGEX.containsMatchIn(response)) {
+            // Only include it if is a "Media Playlist" (any #EXTINF tags are found), or if it is a "Master Playlist" (parsing is non null)
+            if (parsed != null || response.contains("#EXTINF")) {
                 list += m3u8
             } else {
                 Log.i(TAG, "M3u8 Playlist is not a \"Master Playlist\" nor a \"Media Playlist\". Removing this link as it is invalid and will not open in player: ${m3u8.streamUrl}")
@@ -253,6 +342,41 @@ object M3u8Helper2 {
         requireAudio: Boolean,
         depth: Int = 3,
     ): LazyHlsDownloadData {
+        // Retry logic to handle timing/race conditions in parsing
+        var attempts = 0
+        val maxAttempts = 5
+        var lastException: Exception? = null
+        
+        println("M3u8Helper2.hslLazy - Starting with $maxAttempts max attempts")
+        
+        while (attempts < maxAttempts) {
+            try {
+                println("M3u8Helper2.hslLazy - Attempt ${attempts + 1}")
+                val result = hslLazyInternal(playlistStream, selectBest, requireAudio, depth)
+                println("M3u8Helper2.hslLazy - Attempt ${attempts + 1} succeeded")
+                return result
+            } catch (e: Exception) {
+                lastException = e
+                attempts++
+                println("M3u8Helper2.hslLazy - Attempt $attempts failed: ${e.message}")
+                if (attempts < maxAttempts) {
+                    println("M3u8Helper2.hslLazy - Waiting ${500L * attempts}ms before retry")
+                    delay(500L * attempts) // Exponential backoff: 500ms, 1000ms, 1500ms, 2000ms
+                }
+            }
+        }
+        
+        println("M3u8Helper2.hslLazy - All $maxAttempts attempts failed")
+        throw lastException ?: IllegalStateException("Failed to parse M3U8 after $maxAttempts attempts")
+    }
+    
+    @Throws
+    private suspend fun hslLazyInternal(
+        playlistStream: M3u8Helper.M3u8Stream,
+        selectBest: Boolean = true,
+        requireAudio: Boolean,
+        depth: Int = 3,
+    ): LazyHlsDownloadData {
         // Allow nesting, but not too much:
         // Master Playlist (different videos)
         // -> Media Playlist (different qualities of the same video)
@@ -268,8 +392,23 @@ object M3u8Helper2 {
                 verify = false
             ).text
 
-        val parsed = HlsPlaylistParser.parse(playlistStream.streamUrl, playlistResponse)
+        if (playlistResponse.contains("<html", ignoreCase = true) || 
+            playlistResponse.contains("<!DOCTYPE html", ignoreCase = true)) {
+            Log.e(TAG, "M3U8 request returned HTML instead of a playlist. This likely means a Cloudflare block or a redirect to a login/error page.")
+            Log.e(TAG, "URL: ${playlistStream.streamUrl}")
+            Log.e(TAG, "Content snippet: ${playlistResponse.take(500)}")
+            throw ErrorLoadingException("Cloudflare or Server Block: M3U8 request returned HTML")
+        }
+
+        println("M3u8Helper2 DEBUG: URL: ${playlistStream.streamUrl}")
+        println("M3u8Helper2 DEBUG: Content Length: ${playlistResponse.length}")
+        println("M3u8Helper2 DEBUG: Content Header: ${playlistResponse.take(200)}")
+
+        val normalizedPlaylistResponse = normalizeHlsTagPrefixes(playlistResponse)
+        val parsed = HlsPlaylistParser.parse(playlistStream.streamUrl, normalizedPlaylistResponse)
+        
         if (parsed != null) {
+            println("M3u8Helper2 DEBUG: Detected as MASTER playlist with ${parsed.variants.size} variants")
             // find first with no audio group if audio is required, as otherwise muxing is required
             // as m3u8 files can include separate tracks for dubs/subs
             val variants = if (requireAudio) {
@@ -339,18 +478,28 @@ object M3u8Helper2 {
         }
 
         val relativeUrl = getParentLink(playlistStream.streamUrl)
-        val allTsList = TS_EXTENSION_REGEX.findAll(playlistResponse + "\n").map { ts ->
-            val time = ts.groupValues[1]
-            val value = ts.groupValues[3]
-            val url = if (isNotCompleteUrl(value)) {
-                "$relativeUrl/${value}"
-            } else {
-                value
-            }
-            TsLink(url = url, time = time.toDoubleOrNull())
-        }.toList()
+        val allTsList = extractMediaSegmentLinks(normalizedPlaylistResponse, playlistStream.streamUrl)
 
-        if (allTsList.isEmpty()) throw IllegalStateException("M3u8 must contains TS files")
+        if (allTsList.isEmpty()) {
+            // Log the actual M3U8 content for debugging
+            Log.e(TAG, "M3U8 parsing failed for URL: ${playlistStream.streamUrl}")
+            Log.e(TAG, "M3U8 content (first 1000 chars): ${playlistResponse.take(1000)}")
+            Log.e(TAG, "M3U8 content length: ${playlistResponse.length} chars")
+
+            // Check if this might be a master playlist that wasn't detected
+            if (playlistResponse.contains("#EXT-X-STREAM-INF") ||
+                playlistResponse.contains("#EXT-X-I-FRAME-STREAM-INF")) {
+                Log.e(TAG, "Playlist contains #EXT-X-STREAM-INF but was not detected as master playlist")
+                throw IllegalStateException("M3U8 master playlist was not properly resolved to media playlist")
+            }
+            
+            if (playlistResponse.contains("<html", ignoreCase = true) || 
+                playlistResponse.contains("<!DOCTYPE html", ignoreCase = true)) {
+                 throw ErrorLoadingException("Cloudflare or Server Block: M3U8 request returned HTML")
+            }
+
+            throw IllegalStateException("M3U8 contains no media segments (TS, m4s, or other supported formats)")
+        }
 
         return LazyHlsDownloadData(
             encryptionData = encryptionData,

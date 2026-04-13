@@ -121,7 +121,11 @@ abstract class BaseFetchButton(context: Context, attributeSet: AttributeSet) :
             progressBar.max = steps.toInt()
             // div by zero error and 1 byte off is ok impo
 
-            val progress = (downloadedBytes * steps / (totalBytes + 1L)).toInt()
+            val progress = if (totalBytes > 0) {
+                (downloadedBytes * steps / totalBytes).toInt()
+            } else {
+                0
+            }
 
             val animation = ProgressBarAnimation(
                 progressBar,
